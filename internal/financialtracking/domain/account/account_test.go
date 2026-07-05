@@ -93,7 +93,7 @@ func TestNew(t *testing.T) {
 			assert.Equal(t, tc.accountName, got.Name())
 
 			initialBalance := got.Balance()
-			assert.True(t, initialBalance.Money().IsZero(), "saldo inicial deve ser zero")
+			assert.True(t, initialBalance.Money().IsZeroAmount(), "saldo inicial deve ser zero")
 			assert.True(t, initialBalance.Currency().Equals(tc.currency))
 
 			assert.Empty(t, got.Events(), "criar conta não emite evento")
@@ -140,7 +140,7 @@ func TestUpdateBalance(t *testing.T) {
 		require.True(t, ok, "evento deve ser account.BalanceUpdated")
 		assert.Equal(t, account.EventTypeBalanceUpdated, event.EventName())
 		assert.True(t, event.AccountID().Equals(validAccount.ID()))
-		assert.True(t, event.Previous().Money().IsZero(), "previous deve ser o saldo inicial zero")
+		assert.True(t, event.Previous().Money().IsZeroAmount(), "previous deve ser o saldo inicial zero")
 		assert.Equal(t, int64(150_00), event.Current().Money().Amount())
 		assert.False(t, event.OccurredAt().IsZero())
 	})

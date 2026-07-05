@@ -38,27 +38,43 @@ func (m Money) Currency() Currency {
 	return m.currency
 }
 
+// assertSameCurrency é a única casa da regra de moeda única nas operações
+// aritméticas.
+func (m Money) assertSameCurrency(other Money) error {
+	if !m.currency.Equals(other.currency) {
+		return ErrCurrencyMismatch
+	}
+	return nil
+}
+
 // Add devolve uma NOVA Money = m + other. Nunca muta m nem other.
-// Moedas diferentes → ErrCurrencyMismatch.
 // TODO: overflow de int64 não é tratado na v1 (centavos cabem em int64
 // até ~92 quatrilhões de reais).
 func (m Money) Add(other Money) (Money, error) {
-	if !m.currency.Equals(other.currency) {
-		return Money{}, ErrCurrencyMismatch
+	if err := m.assertSameCurrency(other); err != nil {
+		return Money{}, err
 	}
 	return Money{amount: m.amount + other.amount, currency: m.currency}, nil
 }
 
 // Subtract devolve uma NOVA Money = m - other. Mesma regra de currency do Add.
 func (m Money) Subtract(other Money) (Money, error) {
-	if !m.currency.Equals(other.currency) {
-		return Money{}, ErrCurrencyMismatch
+	if err := m.assertSameCurrency(other); err != nil {
+		return Money{}, err
 	}
 	return Money{amount: m.amount - other.amount, currency: m.currency}, nil
 }
 
-// IsZero retorna true se a quantia é zero (independente da moeda).
+// IsZero informa se este Money é o zero value (criado fora do NewMoney),
+// detectável pela Currency vazia — mesma convenção de IsZero de todos os
+// VOs do BC. Pra saber se a QUANTIA é zero, use IsZeroAmount.
 func (m Money) IsZero() bool {
+	return m.currency.IsZero()
+}
+
+// IsZeroAmount informa se a quantia é zero. Quantia zero é um Money VÁLIDO
+// (saldo zerado existe).
+func (m Money) IsZeroAmount() bool {
 	return m.amount == 0
 }
 

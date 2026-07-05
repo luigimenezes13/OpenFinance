@@ -24,11 +24,9 @@ type Balance struct {
 }
 
 // NewBalance valida e constrói um Balance. Quantia R$ 0,00 é VÁLIDA (saldo
-// zerado existe); o que é recusado é Money nunca construído (zero value,
-// detectável pela Currency vazia) e instante zero.
+// zerado existe); o que é recusado é Money zero value e instante zero.
 func NewBalance(money shared.Money, asOf time.Time) (Balance, error) {
-	currency := money.Currency()
-	if currency.IsZero() {
+	if money.IsZero() {
 		return Balance{}, ErrInvalidBalance
 	}
 	if asOf.IsZero() {

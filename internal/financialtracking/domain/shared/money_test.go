@@ -144,23 +144,39 @@ func TestMoneySubtract(t *testing.T) {
 	}
 }
 
-// TestMoneyIsZero — predicado binário, cenários discretos. Sem tabela.
-func TestMoneyIsZero(t *testing.T) {
+// TestMoneyIsZeroAmount — predicado binário, cenários discretos. Sem tabela.
+func TestMoneyIsZeroAmount(t *testing.T) {
 	t.Parallel()
 
 	t.Run("quantia zero", func(t *testing.T) {
 		t.Parallel()
-		assert.True(t, mustMoney(t, 0, "BRL").IsZero())
+		assert.True(t, mustMoney(t, 0, "BRL").IsZeroAmount())
 	})
 
 	t.Run("quantia positiva", func(t *testing.T) {
 		t.Parallel()
-		assert.False(t, mustMoney(t, 1, "BRL").IsZero())
+		assert.False(t, mustMoney(t, 1, "BRL").IsZeroAmount())
 	})
 
 	t.Run("quantia negativa", func(t *testing.T) {
 		t.Parallel()
-		assert.False(t, mustMoney(t, -1, "BRL").IsZero())
+		assert.False(t, mustMoney(t, -1, "BRL").IsZeroAmount())
+	})
+}
+
+// TestMoneyIsZero — zero value vs Money construído, mesma convenção de
+// IsZero de todos os VOs do BC.
+func TestMoneyIsZero(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero value", func(t *testing.T) {
+		t.Parallel()
+		assert.True(t, shared.Money{}.IsZero())
+	})
+
+	t.Run("Money construído com quantia zero NÃO é zero value", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, mustMoney(t, 0, "BRL").IsZero())
 	})
 }
 
