@@ -61,14 +61,12 @@ func New(userID shared.UserID, name string, kind Kind, currency shared.Currency,
 	if userID.IsZero() {
 		return nil, shared.ErrInvalidUserID
 	}
-	if err := validateName(name); err != nil {
+	canonicalName, err := normalizeName(name)
+	if err != nil {
 		return nil, err
 	}
 	if kind.IsZero() {
 		return nil, ErrInvalidKind
-	}
-	if currency.IsZero() {
-		return nil, shared.ErrInvalidCurrency
 	}
 	if source.IsZero() {
 		return nil, ErrInvalidSource
@@ -86,7 +84,7 @@ func New(userID shared.UserID, name string, kind Kind, currency shared.Currency,
 	return &Account{
 		id:      NewAccountID(),
 		userID:  userID,
-		name:    strings.TrimSpace(name),
+		name:    canonicalName,
 		kind:    kind,
 		balance: initialBalance,
 		source:  source,
@@ -108,12 +106,14 @@ func Reconstitute(id AccountID, userID shared.UserID, name string, kind Kind, ba
 	}
 }
 
-// validateName concentra a regra de nome válido — New e Rename usam a mesma.
-func validateName(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return ErrInvalidName
+// normalizeName é a única casa da regra "o que é um nome de conta válido":
+// valida e devolve a forma canônica. New e Rename usam o retorno.
+func normalizeName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", ErrInvalidName
 	}
-	return nil
+	return name, nil
 }
 
 // ID retorna a identidade da conta.
@@ -175,10 +175,11 @@ func (a *Account) UpdateBalance(newBalance Balance) error {
 // Rename troca o nome da conta (mesma validação do New, via validateName).
 // Sem evento: nenhum consumidor se importa com renomeação no v1.
 func (a *Account) Rename(newName string) error {
-	if err := validateName(newName); err != nil {
+	canonicalName, err := normalizeName(newName)
+	if err != nil {
 		return err
 	}
-	a.name = strings.TrimSpace(newName)
+	a.name = canonicalName
 	return nil
 }
 

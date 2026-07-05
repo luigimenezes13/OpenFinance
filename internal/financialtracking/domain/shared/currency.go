@@ -23,9 +23,6 @@ type Currency struct {
 // NewCurrency valida e retorna um Currency. Único caminho de criação válido.
 // Recusa códigos em lowercase: o chamador envia no formato canônico maiúsculo.
 func NewCurrency(code string) (Currency, error) {
-	if len(code) != 3 {
-		return Currency{}, ErrInvalidCurrency
-	}
 	if _, ok := supportedCurrencies[code]; !ok {
 		return Currency{}, ErrInvalidCurrency
 	}
