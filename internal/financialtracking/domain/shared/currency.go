@@ -14,6 +14,8 @@ var supportedCurrencies = map[string]struct{}{
 }
 
 // Currency é o VO de moeda. Imutável, comparável por valor.
+//
+// DDD: Value Object — imutável, sem identidade, auto-validado.
 type Currency struct {
 	code string
 }

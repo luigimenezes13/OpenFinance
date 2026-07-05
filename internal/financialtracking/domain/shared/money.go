@@ -11,6 +11,8 @@ var ErrCurrencyMismatch = errors.New("currency mismatch")
 // Money é o VO de quantia monetária em CENTAVOS (int64).
 // Floats são proibidos em domínio financeiro (precisão).
 // Composição: Money contém Currency por valor — imutabilidade aninhada.
+//
+// DDD: Value Object — imutável, sem identidade, auto-validado.
 type Money struct {
 	amount   int64
 	currency Currency
