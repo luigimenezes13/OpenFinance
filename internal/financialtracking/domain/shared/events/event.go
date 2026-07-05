@@ -1,0 +1,20 @@
+// Package events define os contratos de eventos de domínio do Financial
+// Tracking BC. Aqui vivem só interfaces: os eventos concretos vivem no
+// package de cada aggregate (quem emite é o root), e o dispatcher concreto
+// vive em platform.
+package events
+
+import "time"
+
+// Event é o contrato mínimo que todo evento de domínio satisfaz.
+//
+// DDD: Domain Event (contrato) — os eventos concretos são VOs imutáveis
+// nomeados no passado.
+type Event interface {
+	// EventName identifica o tipo do evento no formato
+	// "financialtracking.<aggregate>.<fato_no_passado>".
+	EventName() string
+
+	// OccurredAt registra quando o fato aconteceu no domínio.
+	OccurredAt() time.Time
+}
