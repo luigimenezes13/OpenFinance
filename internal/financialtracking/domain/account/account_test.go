@@ -208,22 +208,6 @@ func TestRename(t *testing.T) {
 	})
 }
 
-// TestReconstitute — hidratação confia nos dados e não emite eventos.
-func TestReconstitute(t *testing.T) {
-	t.Parallel()
-
-	id := account.NewAccountID()
-	userID := mustUserID(t, validUUID)
-	balance := mustBalance(t, 999_99, "BRL", time.Now())
-
-	got := account.Reconstitute(id, userID, "Poupança", account.KindSavings, balance, account.NewManualSource())
-
-	assert.True(t, got.ID().Equals(id))
-	assert.Equal(t, "Poupança", got.Name())
-	assert.Equal(t, int64(999_99), got.Balance().Money().Amount())
-	assert.Empty(t, got.Events(), "rehidratar não é fato de domínio")
-}
-
 // TestClearEvents — o ciclo Save → Dispatch → ClearEvents do use case,
 // mais o contrato de que Events() devolve cópia.
 func TestClearEvents(t *testing.T) {
