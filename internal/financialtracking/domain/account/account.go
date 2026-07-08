@@ -91,21 +91,6 @@ func New(userID shared.UserID, name string, kind Kind, currency shared.Currency,
 	}, nil
 }
 
-// Reconstitute hidrata o aggregate a partir do banco (caminho dos
-// repositories). CONFIA nos dados — foram validados quando entraram no
-// sistema — por isso sem retorno de erro e sem eventos: rehidratar não é
-// fato de domínio novo.
-func Reconstitute(id AccountID, userID shared.UserID, name string, kind Kind, balance Balance, source Source) *Account {
-	return &Account{
-		id:      id,
-		userID:  userID,
-		name:    name,
-		kind:    kind,
-		balance: balance,
-		source:  source,
-	}
-}
-
 // normalizeName é a única casa da regra "o que é um nome de conta válido":
 // valida e devolve a forma canônica. New e Rename usam o retorno.
 func normalizeName(raw string) (string, error) {
