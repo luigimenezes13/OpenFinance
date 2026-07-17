@@ -4,6 +4,8 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // ErrInvalidUserID indica um UUID que não representa identidade de usuário
@@ -17,12 +19,12 @@ type userIdentity struct{}
 // Alias (=), não defined type, de propósito: preserva os métodos de TypedID.
 //
 // DDD: Value Object (identidade) — imutável, auto-validado no construtor.
-type UserID = TypedID[userIdentity]
+type UserID = kernel.TypedID[userIdentity]
 
 // NewUserID constrói o UserID a partir de um uuid.UUID já convertido pela
 // borda, traduzindo a invariante pro sentinel deste contexto.
 func NewUserID(value uuid.UUID) (UserID, error) {
-	userID, err := TypedIDFromUUID[userIdentity](value)
+	userID, err := kernel.TypedIDFromUUID[userIdentity](value)
 	if err != nil {
 		return UserID{}, ErrInvalidUserID
 	}

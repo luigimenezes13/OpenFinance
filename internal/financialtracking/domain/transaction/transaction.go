@@ -4,7 +4,6 @@
 package transaction
 
 import (
-	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
-	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared/events"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // transactionIdentity é o phantom type que marca identidades de transação.
@@ -22,18 +21,18 @@ type transactionIdentity struct{}
 // TransactionID é o VO de identidade da transação.
 //
 // DDD: Value Object (identidade) — imutável, auto-validado no construtor.
-type TransactionID = shared.TypedID[transactionIdentity]
+type TransactionID = kernel.TypedID[transactionIdentity]
 
 // NewTransactionID gera uma identidade nova.
 func NewTransactionID() TransactionID {
-	return shared.NewTypedID[transactionIdentity]()
+	return kernel.NewTypedID[transactionIdentity]()
 }
 
 // TransactionIDFromUUID constrói o TransactionID a partir de um uuid.UUID
 // já convertido pela borda, traduzindo a invariante pro sentinel do
 // aggregate.
 func TransactionIDFromUUID(value uuid.UUID) (TransactionID, error) {
-	transactionID, err := shared.TypedIDFromUUID[transactionIdentity](value)
+	transactionID, err := kernel.TypedIDFromUUID[transactionIdentity](value)
 	if err != nil {
 		return TransactionID{}, ErrInvalidID
 	}
@@ -47,6 +46,8 @@ func TransactionIDFromUUID(value uuid.UUID) (TransactionID, error) {
 // DDD: Aggregate Root — fronteira de consistência; toda mutação e toda
 // emissão de eventos passa por aqui.
 type Transaction struct {
+	kernel.EventRecorder // embed: promove Events(), ClearEvents(), RecordEvent()
+
 	id          TransactionID
 	userID      shared.UserID
 	accountID   account.AccountID
@@ -56,7 +57,6 @@ type Transaction struct {
 	category    *CategoryAssignment
 	externalRef *ExternalRef
 	reconciled  bool
-	events      []events.Event
 }
 
 // normalizeDescription é a única casa da regra "o que é uma descrição
@@ -137,7 +137,7 @@ func NewFromProvider(userID shared.UserID, accountID account.AccountID, money sh
 	}
 
 	imported.externalRef = &ref
-	imported.events = append(imported.events, NewImported(imported.id, imported.userID, imported.accountID, ref))
+	imported.RecordEvent(NewImported(imported.id, imported.userID, imported.accountID, ref))
 	return imported, nil
 }
 
@@ -208,7 +208,7 @@ func (t *Transaction) Categorize(categoryID category.CategoryID, by AssignedBy) 
 	}
 
 	t.category = &assignment
-	t.events = append(t.events, NewCategorized(t.id, t.userID, categoryID, by))
+	t.RecordEvent(NewCategorized(t.id, t.userID, categoryID, by))
 	return nil
 }
 
@@ -228,18 +228,6 @@ func (t *Transaction) MarkReconciled() error {
 	}
 
 	t.reconciled = true
-	t.events = append(t.events, NewReconciled(t.id, t.userID))
+	t.RecordEvent(NewReconciled(t.id, t.userID))
 	return nil
-}
-
-// Events retorna cópia dos eventos acumulados — expor o slice interno
-// deixaria o chamador mutar o histórico por fora do root. O use case lê
-// após persistir: Save → Dispatch → ClearEvents.
-func (t *Transaction) Events() []events.Event {
-	return slices.Clone(t.events)
-}
-
-// ClearEvents descarta os eventos já despachados.
-func (t *Transaction) ClearEvents() {
-	t.events = nil
 }

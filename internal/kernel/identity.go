@@ -1,16 +1,15 @@
-package shared
+// Package kernel é o Shared Kernel (DDD) do projeto: os building blocks de
+// domínio compartilhados pelos bounded contexts — identidade tipada
+// (TypedID), o acúmulo de eventos do aggregate root (EventRecorder) e, no
+// sub-package events, o contrato de eventos de domínio. Depende só da
+// stdlib e de google/uuid; nunca importa um bounded context (a seta de
+// dependência aponta sempre para cá).
+package kernel
 
-import (
-	"errors"
+import "github.com/google/uuid"
 
-	"github.com/google/uuid"
-)
-
-// ErrInvalidIdentifier indica um UUID que não identifica nada: o uuid.Nil.
-var ErrInvalidIdentifier = errors.New("invalid identifier")
-
-// TypedID é a identidade tipada do BC. O parâmetro T é um phantom type:
-// não aparece em campo nenhum — existe só pra o compilador tratar
+// TypedID é a identidade tipada. O parâmetro T é um phantom type: não
+// aparece em campo nenhum — existe só pra o compilador tratar
 // TypedID[userIdentity] e TypedID[accountIdentity] como tipos distintos;
 // comparar identidades de aggregates diferentes nem compila.
 //

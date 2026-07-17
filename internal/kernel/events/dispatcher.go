@@ -6,10 +6,10 @@ import "context"
 type Handler func(ctx context.Context, event Event) error
 
 // Dispatcher é a porta de publicação de eventos. A implementação v1
-// (in-process síncrona) vive em platform; PR2 troca por outbox sem tocar
-// neste contrato.
+// (in-process síncrona) vive na infraestrutura; PR2 troca por outbox sem
+// tocar neste contrato.
 //
-// DDD: Port — contrato no domain, implementação na infraestrutura.
+// DDD: Port — contrato no domínio, implementação na infraestrutura.
 type Dispatcher interface {
 	// Register associa um handler a um nome de evento. Vários handlers
 	// podem observar o mesmo evento.
