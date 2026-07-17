@@ -1,7 +1,7 @@
-// Package events define os contratos de eventos de domínio do Financial
-// Tracking BC. Aqui vivem só interfaces: os eventos concretos vivem no
-// package de cada aggregate (quem emite é o root), e o dispatcher concreto
-// vive em platform.
+// Package events define os contratos de eventos de domínio compartilhados
+// pelos bounded contexts. Aqui vivem só interfaces: os eventos concretos
+// vivem no package de cada aggregate (quem emite é o root), e o dispatcher
+// concreto vive na infraestrutura (platform).
 package events
 
 import "time"
@@ -12,7 +12,7 @@ import "time"
 // nomeados no passado.
 type Event interface {
 	// EventName identifica o tipo do evento no formato
-	// "financialtracking.<aggregate>.<fato_no_passado>".
+	// "<contexto>.<aggregate>.<fato_no_passado>".
 	EventName() string
 
 	// OccurredAt registra quando o fato aconteceu no domínio.

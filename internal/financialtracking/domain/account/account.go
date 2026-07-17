@@ -4,14 +4,13 @@
 package account
 
 import (
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
-	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared/events"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // accountIdentity é o phantom type que marca identidades de conta.
@@ -22,17 +21,17 @@ type accountIdentity struct{}
 // enquanto UserID sempre chega de fora.
 //
 // DDD: Value Object (identidade) — imutável, auto-validado no construtor.
-type AccountID = shared.TypedID[accountIdentity]
+type AccountID = kernel.TypedID[accountIdentity]
 
 // NewAccountID gera uma identidade nova.
 func NewAccountID() AccountID {
-	return shared.NewTypedID[accountIdentity]()
+	return kernel.NewTypedID[accountIdentity]()
 }
 
 // AccountIDFromUUID constrói o AccountID a partir de um uuid.UUID já
 // convertido pela borda, traduzindo a invariante pro sentinel do aggregate.
 func AccountIDFromUUID(value uuid.UUID) (AccountID, error) {
-	accountID, err := shared.TypedIDFromUUID[accountIdentity](value)
+	accountID, err := kernel.TypedIDFromUUID[accountIdentity](value)
 	if err != nil {
 		return AccountID{}, ErrInvalidID
 	}
@@ -45,13 +44,14 @@ func AccountIDFromUUID(value uuid.UUID) (AccountID, error) {
 // DDD: Aggregate Root — fronteira de consistência; toda mutação e toda
 // emissão de eventos passa por aqui.
 type Account struct {
+	kernel.EventRecorder // embed: promove Events(), ClearEvents(), RecordEvent()
+
 	id      AccountID
 	userID  shared.UserID
 	name    string
 	kind    Kind
 	balance Balance
 	source  Source
-	events  []events.Event
 }
 
 // New valida invariantes e cria uma conta nova (caminho dos use cases).
@@ -153,7 +153,7 @@ func (a *Account) UpdateBalance(newBalance Balance) error {
 
 	previous := a.balance
 	a.balance = newBalance
-	a.events = append(a.events, NewBalanceUpdated(a.id, a.userID, previous, newBalance))
+	a.RecordEvent(NewBalanceUpdated(a.id, a.userID, previous, newBalance))
 	return nil
 }
 
@@ -166,16 +166,4 @@ func (a *Account) Rename(newName string) error {
 	}
 	a.name = canonicalName
 	return nil
-}
-
-// Events retorna CÓPIA dos eventos acumulados — expor o slice interno
-// deixaria o chamador mutar o histórico por fora do root. O use case lê
-// após persistir: Save → Dispatch → ClearEvents.
-func (a *Account) Events() []events.Event {
-	return slices.Clone(a.events)
-}
-
-// ClearEvents descarta os eventos já despachados.
-func (a *Account) ClearEvents() {
-	a.events = nil
 }
