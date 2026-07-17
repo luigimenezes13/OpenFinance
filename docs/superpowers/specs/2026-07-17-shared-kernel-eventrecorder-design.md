@@ -73,14 +73,14 @@ internal/kernel/
     event.go        # Event (interface)          ← movido de financialtracking/domain/shared/events/event.go
     dispatcher.go   # Dispatcher, Handler         ← movido de .../shared/events/dispatcher.go
   identity.go       # TypedID + NewTypedID + TypedIDFromUUID   ← movido de shared/identifier.go
-  errors.go         # ErrInvalidIdentifier         ← extraído de shared/errors.go (anda junto do TypedID)
+  errors.go         # ErrInvalidIdentifier         ← movido de shared/identifier.go (onde vivia junto do TypedID)
   recorder.go       # EventRecorder               ← NOVO
 ```
 
 ### O que se move e o que fica
 
 - **Move para `internal/kernel`:** contrato de eventos (`Event`, `Dispatcher`, `Handler`), `TypedID` + construtores, `ErrInvalidIdentifier`.
-- **Fica em `financialtracking/domain/shared`:** `Money`, `Currency`, `UserID` e seus erros (`ErrInvalidUserID`, `ErrInvalidCurrency`). `shared/errors.go` é dividido: `ErrInvalidIdentifier` sai, o resto permanece.
+- **Fica em `financialtracking/domain/shared`:** `Money`, `Currency`, `UserID` e seus erros (`ErrInvalidUserID`, `ErrInvalidCurrency`). O `shared/errors.go` (só `ErrForbidden`) não é tocado — `ErrInvalidIdentifier` vivia em `shared/identifier.go` e migra junto com o `TypedID`, virando `kernel/errors.go`.
 - **Ajuste de imports:** ~10 arquivos do `financialtracking` trocam `.../domain/shared` e `.../domain/shared/events` por `.../kernel` e `.../kernel/events`. São **apenas mudanças de import path — nenhuma alteração de lógica.**
 
 ### Restrição de dependência (por que o contrato de evento move junto)
