@@ -1,0 +1,67 @@
+# Alvos de desenvolvimento. `make test` é o do dia a dia; integração é
+# separada de propósito (precisa de Postgres).
+
+DB_HOST_PORT    ?= 55432
+DB_CREDENTIALS  ?= financial:financial@localhost:$(DB_HOST_PORT)
+DATABASE_URL    ?= postgres://$(DB_CREDENTIALS)/financial_manager?sslmode=disable
+TEST_DB_URL     ?= postgres://$(DB_CREDENTIALS)/financial_manager_test?sslmode=disable
+# Banco DESCARTÁVEL do Atlas: ele reaplica o histórico de migrations aqui pra
+# calcular o diff. Nunca apontar pra produção.
+ATLAS_DEV_URL   ?= postgres://$(DB_CREDENTIALS)/financial_manager_dev?sslmode=disable&search_path=public
+
+MIGRATE_MAIN := internal/financialtracking/adapter/entrepo/ent/migrate/main.go
+ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
+
+.PHONY: test test-integration generate migrate-diff db-up db-databases db-down db-reset fmt vet check
+
+# Testes unitários: domínio e application. Sem banco, sem rede.
+test:
+	go test ./... -count=1
+
+# Testes de integração: repositórios contra Postgres real, com as migrations
+# geradas aplicadas. A build tag `integration` os mantém fora do `make test`.
+test-integration: db-up
+	TEST_DATABASE_URL="$(TEST_DB_URL)" go test ./... -count=1 -tags integration -run Integration
+
+# Regenera o client tipado a partir de ent/schema. Rodar SEMPRE que um
+# schema mudar — o código gerado é versionado, não é artefato de build.
+generate:
+	cd $(ENT_DIR) && go run -mod=mod entgo.io/ent/cmd/ent generate --feature sql/upsert,sql/versioned-migration ./schema
+
+# Gera a migration do diff entre o schema declarado e o histórico já
+# existente — o equivalente do `prisma migrate dev`.
+# Uso: make migrate-diff name=add_budget_table
+migrate-diff: db-up
+	@test -n "$(name)" || (echo "uso: make migrate-diff name=<nome_da_mudanca>"; exit 1)
+	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(MIGRATE_MAIN) $(name)
+
+db-up: db-databases
+
+# Sobe o Postgres e garante os bancos auxiliares. O script de init do compose
+# só roda em volume vazio, então aqui os bancos são criados de forma
+# idempotente — assim `make test-integration` funciona em volume antigo.
+db-databases:
+	docker compose up -d --wait postgres
+	@for database in financial_manager_test financial_manager_dev; do \
+		docker compose exec -T postgres psql -U financial -d postgres -tc \
+			"SELECT 1 FROM pg_database WHERE datname='$$database'" | grep -q 1 || \
+		docker compose exec -T postgres psql -U financial -d postgres -c \
+			"CREATE DATABASE $$database"; \
+	done
+
+db-down:
+	docker compose down
+
+# Apaga o volume junto: usar quando quiser começar do zero.
+db-reset:
+	docker compose down -v
+	$(MAKE) db-up
+
+fmt:
+	gofmt -l -w .
+
+vet:
+	go vet ./...
+
+# O que rodar antes de commitar.
+check: fmt vet test

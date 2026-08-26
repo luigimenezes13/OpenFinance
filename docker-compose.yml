@@ -1,0 +1,38 @@
+# Postgres local para desenvolvimento e testes de integração.
+#
+# Porta 55432 no host (e não 5432) de propósito: não conflita com um
+# Postgres já instalado na máquina, e um `psql` distraído não aponta pro
+# banco errado.
+#
+# Três bancos, cada um com um papel:
+#   financial_manager      → desenvolvimento
+#   financial_manager_test → testes de integração (o schema é derrubado e
+#                            recriado a cada execução)
+#   financial_manager_dev  → banco DESCARTÁVEL do Atlas: ele reaplica o
+#                            histórico de migrations aqui pra calcular o
+#                            diff do schema. Nunca aponte isso pra produção.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: financial-manager-postgres
+    environment:
+      POSTGRES_USER: financial
+      POSTGRES_PASSWORD: financial
+      POSTGRES_DB: financial_manager
+    ports:
+      - "55432:5432"
+    healthcheck:
+      # O Makefile espera por este healthcheck antes de rodar os testes —
+      # container "started" não significa Postgres aceitando conexão.
+      test: ["CMD-SHELL", "pg_isready -U financial -d financial_manager"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Só roda quando o volume está vazio (primeiro `up` ou após
+      # `make db-reset`); o alvo `db-databases` do Makefile cobre o resto.
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/10-databases.sql:ro
+
+volumes:
+  postgres_data:
