@@ -12,7 +12,11 @@ ATLAS_DEV_URL   ?= postgres://$(DB_CREDENTIALS)/financial_manager_dev?sslmode=di
 MIGRATE_MAIN := internal/financialtracking/adapter/entrepo/ent/migrate/main.go
 ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
 
-.PHONY: test test-integration generate migrate-diff db-up db-databases db-down db-reset fmt vet check
+.PHONY: run test test-integration generate migrate-diff migrate-apply db-up db-databases db-down db-reset fmt vet check
+
+# Sobe a API localmente contra o Postgres do compose.
+run: db-up
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/api
 
 # Testes unitários: domínio e application. Sem banco, sem rede.
 test:
@@ -34,6 +38,18 @@ generate:
 migrate-diff: db-up
 	@test -n "$(name)" || (echo "uso: make migrate-diff name=<nome_da_mudanca>"; exit 1)
 	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(MIGRATE_MAIN) $(name)
+
+# DEV: derruba o schema do banco de desenvolvimento e reaplica TODAS as
+# migrations. Destrutivo de propósito e só para desenvolvimento — em
+# produção quem aplica é o Atlas CLI (`atlas migrate apply`), que controla
+# histórico e checa o atlas.sum.
+migrate-apply: db-up
+	docker compose exec -T postgres psql -U financial -d financial_manager -v ON_ERROR_STOP=1 \
+		-c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+	@for file in migrations/*.sql; do \
+		echo "aplicando $$file"; \
+		docker compose exec -T postgres psql -U financial -d financial_manager -v ON_ERROR_STOP=1 -f - < $$file; \
+	done
 
 db-up: db-databases
 
