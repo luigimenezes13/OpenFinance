@@ -50,14 +50,26 @@ type CategoryRule struct {
 // keyword é guardado na forma canônica (trim); vazio ou só espaços é
 // recusado — regra sem termo não casa nada.
 func NewCategoryRule(keyword string) (CategoryRule, error) {
-	normalizedKeyword := strings.TrimSpace(keyword)
-	if normalizedKeyword == "" {
-		return CategoryRule{}, ErrInvalidKeyword
+	canonicalKeyword, err := normalizeKeyword(keyword)
+	if err != nil {
+		return CategoryRule{}, err
 	}
 	return CategoryRule{
 		id:      NewRuleID(),
-		keyword: normalizedKeyword,
+		keyword: canonicalKeyword,
 	}, nil
+}
+
+// normalizeKeyword é a única casa da regra "o que é um keyword válido":
+// valida e devolve a forma canônica. Compartilhada pelo construtor e pela
+// rehidratação (ruleFromSnapshot) — dois caminhos de montagem com critérios
+// diferentes seriam duas verdades sobre a mesma regra.
+func normalizeKeyword(raw string) (string, error) {
+	keyword := strings.TrimSpace(raw)
+	if keyword == "" {
+		return "", ErrInvalidKeyword
+	}
+	return keyword, nil
 }
 
 // ID retorna a identidade da regra.
