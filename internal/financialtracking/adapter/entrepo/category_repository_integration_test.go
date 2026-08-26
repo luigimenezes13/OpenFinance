@@ -43,17 +43,26 @@ func TestIntegrationCategoryRepositoryRoundTripComRegras(t *testing.T) {
 	assert.Equal(t, "Alimentação", found.Name())
 	assert.Nil(t, found.ParentID(), "categoria raiz")
 
-	originalRules := original.Rules()
-	foundRules := found.Rules()
-	require.Len(t, foundRules, 2)
+	// A comparação é por CONJUNTO (keyword -> id), não por posição: as
+	// regras não têm ordem semântica, e comparar posicionalmente testaria
+	// uma garantia que o domínio não dá — foi assim que este teste passou
+	// por sorte até dois keywords empatarem no mesmo microssegundo.
+	originalIDByKeyword := make(map[string]string, 2)
+	for _, rule := range original.Rules() {
+		ruleID := rule.ID()
+		originalIDByKeyword[rule.Keyword()] = ruleID.String()
+	}
 
-	firstOriginal := originalRules[0]
-	firstFound := foundRules[0]
-	originalRuleID := firstOriginal.ID()
-	foundRuleID := firstFound.ID()
-	assert.True(t, foundRuleID.Equals(originalRuleID),
-		"o RuleID sobrevive: senão o RemoveRule do usuário miraria um id inexistente")
-	assert.Equal(t, firstOriginal.Keyword(), firstFound.Keyword())
+	foundIDByKeyword := make(map[string]string, 2)
+	for _, rule := range found.Rules() {
+		ruleID := rule.ID()
+		foundIDByKeyword[rule.Keyword()] = ruleID.String()
+	}
+
+	require.Len(t, foundIDByKeyword, 2)
+	// A IDENTIDADE de cada regra sobrevive: senão o RemoveRule do usuário
+	// miraria um id que não existe mais.
+	assert.Equal(t, originalIDByKeyword, foundIDByKeyword)
 }
 
 // TestIntegrationCategoryRepositorySaveReplacesRules cobre a estratégia

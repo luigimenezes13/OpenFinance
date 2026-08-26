@@ -84,8 +84,21 @@ func (r *CategoryRepository) FindByID(ctx context.Context, id domaincategory.Cat
 	row, err := r.client.Category.Query().
 		Where(entcategory.IDEQ(id.UUID())).
 		WithRules(func(query *ent.CategoryRuleQuery) {
-			// Ordem estável: a leitura não pode embaralhar as regras.
-			query.Order(ent.Asc(entcategoryrule.FieldCreatedAt, entcategoryrule.FieldID))
+			// Ordenado por KEYWORD, não por created_at.
+			//
+			// As regras de uma categoria são um CONJUNTO, não uma lista: o
+			// domínio deduplica por keyword e nenhuma regra tem prioridade
+			// sobre outra. Ordenar por created_at prometeria preservar a
+			// ordem de inserção — promessa que o banco não cumpre, porque
+			// timestamptz trunca em microssegundo e duas regras adicionadas
+			// no mesmo instante empatam, deixando a ordem final por conta
+			// do id (uuid aleatório).
+			//
+			// keyword é único por categoria (o índice garante), então a
+			// ordenação é determinística e ainda legível. Se a rules engine
+			// (PR2/PR5) precisar de precedência, ela entra como campo
+			// EXPLÍCITO no domínio, não como ordem implícita de inserção.
+			query.Order(ent.Asc(entcategoryrule.FieldKeyword))
 		}).
 		Only(ctx)
 	if ent.IsNotFound(err) {
