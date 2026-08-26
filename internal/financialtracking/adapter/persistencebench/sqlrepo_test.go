@@ -86,8 +86,11 @@ const categoryRulesDeleteSQL = `DELETE FROM category_rules WHERE category_id = $
 
 const categorySelectSQL = `SELECT id, user_id, name, parent_id FROM categories WHERE id = $1`
 
+// Ordenado por keyword, igual ao adapter de produção: as regras são um
+// conjunto, e created_at empata em microssegundo. Manter o mesmo ORDER BY é
+// o que garante que o benchmark compara SQL equivalente.
 const categoryRulesSelectSQL = `
-SELECT id, keyword FROM category_rules WHERE category_id = $1 ORDER BY created_at, id`
+SELECT id, keyword FROM category_rules WHERE category_id = $1 ORDER BY keyword`
 
 // categoryRulesInsertSQL monta um insert multi-linha com N regras — o mesmo
 // formato que o CreateBulk do Ent emite.
