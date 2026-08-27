@@ -29,6 +29,11 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/application"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	identityentrepo "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
+	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
+	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/googleoidc"
+	identityapplication "github.com/luigimenezes13/financial-manager/internal/identity/application"
+	identitydomain "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 	"github.com/luigimenezes13/financial-manager/internal/platform/config"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
@@ -68,10 +73,19 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
+	// Um client Ent por bounded context, sobre o MESMO pool: schema e
+	// histórico de migrations são por BC; conexão é recurso de processo.
 	entClient := entrepo.NewClient(database)
 	defer func() {
 		if closeErr := entClient.Close(); closeErr != nil {
 			logger.Error("falha fechando client", slog.String("error", closeErr.Error()))
+		}
+	}()
+
+	identityClient := identityentrepo.NewClient(database)
+	defer func() {
+		if closeErr := identityClient.Close(); closeErr != nil {
+			logger.Error("falha fechando client de identidade", slog.String("error", closeErr.Error()))
 		}
 	}()
 
@@ -82,9 +96,17 @@ func run(logger *slog.Logger) error {
 	provider := mockprovider.New()
 	dispatcher := platformevents.NewInProcessDispatcher(logger)
 
+	users := identityentrepo.NewUserRepository(identityClient)
+	verifier, err := googleoidc.NewVerifier(configuration.GoogleClientID)
+	if err != nil {
+		return err
+	}
+
 	registerEventLogging(dispatcher, logger)
 
 	// --- Use cases (só conhecem as portas) ---
+	signIn := identityapplication.NewSignInUseCase(users, verifier, dispatcher)
+
 	createAccount := application.NewCreateAccountUseCase(accounts)
 	createCategory := application.NewCreateCategoryUseCase(categories)
 	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts)
@@ -96,9 +118,15 @@ func run(logger *slog.Logger) error {
 	// Recovery evita que panic em um handler derrube o processo inteiro.
 	router.Use(gin.Recovery())
 
+	// O middleware do BC Identity é montado aqui e entregue pronto ao BC
+	// Financial Tracking: as rotas exigem "usuário resolvido", sem saber
+	// como.
+	authenticate := ginmiddleware.Authenticate(ginmiddleware.UserResolverFrom(signIn))
+
 	ginhandler.RegisterRoutes(
 		router,
 		database,
+		authenticate,
 		ginhandler.NewAccountHandler(createAccount, logger),
 		ginhandler.NewTransactionHandler(recordTransaction, categorizeTransaction, importFromProvider, logger),
 		ginhandler.NewCategoryHandler(createCategory, logger),
@@ -159,4 +187,5 @@ func registerEventLogging(dispatcher *platformevents.InProcessDispatcher, logger
 	dispatcher.Register(transaction.EventTypeCategorized, logEvent)
 	dispatcher.Register(transaction.EventTypeReconciled, logEvent)
 	dispatcher.Register(account.EventTypeBalanceUpdated, logEvent)
+	dispatcher.Register(identitydomain.EventTypeRegistered, logEvent)
 }
