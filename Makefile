@@ -10,10 +10,12 @@ BENCH_DB_URL    ?= postgres://$(DB_CREDENTIALS)/financial_manager_bench?sslmode=
 # calcular o diff. Nunca apontar pra produção.
 ATLAS_DEV_URL   ?= postgres://$(DB_CREDENTIALS)/financial_manager_dev?sslmode=disable&search_path=public
 
-MIGRATE_MAIN := internal/financialtracking/adapter/entrepo/ent/migrate/main.go
-ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
+FT_MIGRATE_MAIN := internal/financialtracking/adapter/entrepo/ent/migrate/main.go
+FT_ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
+ID_MIGRATE_MAIN := internal/identity/adapter/entrepo/ent/migrate/main.go
+ID_ENT_DIR      := internal/identity/adapter/entrepo/ent
 
-.PHONY: run test test-integration bench-persistence generate migrate-diff migrate-apply db-up db-databases db-down db-reset fmt vet check
+.PHONY: run test test-integration bench-persistence generate migrate-diff migrate-diff-identity migrate-apply db-up db-databases db-down db-reset fmt vet check
 
 # Sobe a API localmente contra o Postgres do compose.
 run: db-up
@@ -35,17 +37,26 @@ bench-persistence: db-up
 	BENCH_DATABASE_URL="$(BENCH_DB_URL)" go test ./internal/financialtracking/adapter/persistencebench/ \
 		-count=1 -tags bench -run TestPersistenceLatency -v -timeout 30m
 
-# Regenera o client tipado a partir de ent/schema. Rodar SEMPRE que um
-# schema mudar — o código gerado é versionado, não é artefato de build.
+# Regenera os clients tipados a partir dos schemas. Um por bounded context:
+# o client do Identity não conhece as entities do Financial Tracking, e é o
+# compilador que garante isso. Rodar SEMPRE que um schema mudar — o código
+# gerado é versionado, não é artefato de build.
 generate:
-	cd $(ENT_DIR) && go run -mod=mod entgo.io/ent/cmd/ent generate --feature sql/upsert,sql/versioned-migration ./schema
+	cd $(FT_ENT_DIR) && go run -mod=mod entgo.io/ent/cmd/ent generate --feature sql/upsert,sql/versioned-migration ./schema
+	cd $(ID_ENT_DIR) && go run -mod=mod entgo.io/ent/cmd/ent generate --feature sql/upsert,sql/versioned-migration ./schema
 
 # Gera a migration do diff entre o schema declarado e o histórico já
-# existente — o equivalente do `prisma migrate dev`.
+# existente — o equivalente do `prisma migrate dev`. Um alvo por bounded
+# context, porque cada um tem histórico próprio.
 # Uso: make migrate-diff name=add_budget_table
 migrate-diff: db-up
 	@test -n "$(name)" || (echo "uso: make migrate-diff name=<nome_da_mudanca>"; exit 1)
-	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(MIGRATE_MAIN) $(name)
+	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(FT_MIGRATE_MAIN) $(name)
+
+# Uso: make migrate-diff-identity name=add_user_locale
+migrate-diff-identity: db-up
+	@test -n "$(name)" || (echo "uso: make migrate-diff-identity name=<nome_da_mudanca>"; exit 1)
+	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(ID_MIGRATE_MAIN) $(name)
 
 # DEV: derruba o schema do banco de desenvolvimento e reaplica TODAS as
 # migrations. Destrutivo de propósito e só para desenvolvimento — em
@@ -54,7 +65,7 @@ migrate-diff: db-up
 migrate-apply: db-up
 	docker compose exec -T postgres psql -U financial -d financial_manager -v ON_ERROR_STOP=1 \
 		-c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-	@for file in migrations/*.sql; do \
+	@for file in migrations/*/*.sql; do \
 		echo "aplicando $$file"; \
 		docker compose exec -T postgres psql -U financial -d financial_manager -v ON_ERROR_STOP=1 -f - < $$file; \
 	done

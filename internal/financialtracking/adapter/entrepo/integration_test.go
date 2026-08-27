@@ -35,7 +35,9 @@ var (
 	testClient *ent.Client
 )
 
-const migrationsDir = "../../../../migrations"
+// Só as migrations DESTE bounded context: os testes daqui não precisam (nem
+// devem depender) das tabelas do Identity.
+const migrationsDir = "../../../../migrations/financialtracking"
 
 // TestMain prepara o schema UMA vez: derruba tudo e aplica as migrations
 // versionadas na ordem. Depois cada teste começa truncando as tabelas.
@@ -69,12 +71,21 @@ func TestMain(main *testing.M) {
 	os.Exit(code)
 }
 
-// resetSchema garante base limpa. As migrations do Atlas são forward-only
-// (não existe .down.sql), então o "desfazer" do ambiente de teste é derrubar
-// o schema inteiro — o que é seguro AQUI e catastrófico em produção; por
-// isso vive num arquivo com build tag de teste.
+// resetSchema garante base limpa derrubando APENAS as tabelas deste bounded
+// context.
+//
+// A versão anterior fazia `DROP SCHEMA public CASCADE`, o que era um bug
+// esperando a hora: o banco de teste é compartilhado e o `go test` roda os
+// packages em PARALELO, então este drop apagaria a tabela do Identity no meio
+// dos testes dele. Listar as tabelas próprias é mais verboso e é a fronteira
+// correta — cada BC limpa o que é seu.
+//
+// As migrations do Atlas são forward-only (não existe .down.sql), então o
+// "desfazer" do ambiente de teste é este drop, seguro AQUI e catastrófico em
+// produção; por isso vive num arquivo com build tag de teste.
 func resetSchema(ctx context.Context, database *sql.DB) error {
-	_, err := database.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`)
+	_, err := database.ExecContext(ctx,
+		`DROP TABLE IF EXISTS transactions, category_rules, categories, accounts CASCADE`)
 	return err
 }
 
