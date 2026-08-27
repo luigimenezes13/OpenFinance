@@ -69,6 +69,11 @@ func TestTodasAsRotasV1ExigemAutenticacao(t *testing.T) {
 		{http.MethodGet, "/v1/transactions/" + uuid.New().String()},
 		{http.MethodPut, "/v1/transactions/" + uuid.New().String() + "/category"},
 		{http.MethodPost, "/v1/transactions/import"},
+		{http.MethodPatch, "/v1/accounts/" + uuid.New().String()},
+		{http.MethodPatch, "/v1/categories/" + uuid.New().String()},
+		{http.MethodPut, "/v1/categories/" + uuid.New().String() + "/parent"},
+		{http.MethodPost, "/v1/categories/" + uuid.New().String() + "/rules"},
+		{http.MethodDelete, "/v1/categories/" + uuid.New().String() + "/rules/" + uuid.New().String()},
 	}
 
 	for _, route := range routes {

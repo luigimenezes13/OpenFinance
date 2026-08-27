@@ -35,9 +35,14 @@ func RegisterRoutes(
 	authenticated.POST("/accounts", accounts.Create)
 	authenticated.GET("/accounts", accounts.List)
 	authenticated.GET("/accounts/:id", accounts.Get)
+	authenticated.PATCH("/accounts/:id", accounts.Rename)
 
 	authenticated.POST("/categories", categories.Create)
 	authenticated.GET("/categories", categories.List)
+	authenticated.PATCH("/categories/:id", categories.Rename)
+	authenticated.PUT("/categories/:id/parent", categories.Move)
+	authenticated.POST("/categories/:id/rules", categories.AddRule)
+	authenticated.DELETE("/categories/:id/rules/:ruleId", categories.RemoveRule)
 
 	authenticated.POST("/transactions", transactions.Record)
 	authenticated.GET("/transactions", transactions.List)

@@ -69,3 +69,15 @@ func optionalInt(context *gin.Context, name string) (int, bool) {
 	}
 	return parsed, true
 }
+
+// pathUUID lê um uuid do CAMINHO (não da query string). Diferente dos
+// opcionais acima, parâmetro de caminho é sempre obrigatório: a rota não
+// existe sem ele.
+func pathUUID(context *gin.Context, name string, description string) (uuid.UUID, bool) {
+	parsed, err := uuid.Parse(context.Param(name))
+	if err != nil {
+		respondBadRequest(context, description+" não é um uuid válido")
+		return uuid.Nil, false
+	}
+	return parsed, true
+}
