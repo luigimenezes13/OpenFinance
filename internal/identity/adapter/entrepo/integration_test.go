@@ -46,6 +46,10 @@ func TestMain(main *testing.M) {
 	testDB = database
 	testClient = entrepo.NewClient(database)
 
+	if err := resetSchema(ctx, database); err != nil {
+		fmt.Printf("falha resetando schema: %v\n", err)
+		os.Exit(1)
+	}
 	if err := applyMigrations(ctx, database); err != nil {
 		fmt.Printf("falha aplicando migrations: %v\n", err)
 		os.Exit(1)
@@ -56,13 +60,32 @@ func TestMain(main *testing.M) {
 	os.Exit(code)
 }
 
-// applyMigrations cria a tabela deste BC se ela ainda não existir.
+// resetSchema derruba APENAS as tabelas deste bounded context, para as
+// migrations serem aplicadas em base limpa.
 //
-// Diferente do harness do Financial Tracking, este NÃO derruba o schema: os
-// dois BCs compartilham o banco de teste, e um `DROP SCHEMA` aqui apagaria
-// as tabelas do outro no meio da execução (o `go test ./...` roda os
-// packages em paralelo). Por isso as migrations são idempotentes na prática:
-// a tabela é criada uma vez e cada teste limpa as linhas.
+// Derrubar só o que é nosso (em vez de `DROP SCHEMA public`) é obrigatório
+// aqui: o banco de teste é compartilhado com o Financial Tracking e o
+// `go test ./...` roda os packages em PARALELO, então um drop amplo apagaria
+// as tabelas do outro BC no meio dos testes dele.
+func resetSchema(ctx context.Context, database *sql.DB) error {
+	_, err := database.ExecContext(ctx, `DROP TABLE IF EXISTS users CASCADE`)
+	return err
+}
+
+// applyMigrations executa os .sql versionados deste BC, em ordem.
+//
+// NENHUM erro é tolerado: se uma migration falha, o teste falha. A versão
+// anterior engolia erro de "objeto já existe" por comparação de SUBSTRING na
+// mensagem, o que era frágil por dois motivos — mascarava falhas reais de
+// migration, e mensagem de erro do Postgres é localizável, então a
+// comparação depende do idioma do servidor. A tolerância existia só porque o
+// harness não limpava antes; com o resetSchema acima, ela deixa de ser
+// necessária.
+//
+// Efeito colateral bom: migration NOVA passa a ser aplicada em banco de
+// teste antigo. Com a tolerância, um banco que já tivesse `users` pularia o
+// ALTER de uma migration posterior e os testes rodariam contra um schema
+// desatualizado.
 func applyMigrations(ctx context.Context, database *sql.DB) error {
 	entries, err := os.ReadDir(migrationsDir)
 	if err != nil {
@@ -75,6 +98,8 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 			files = append(files, entry.Name())
 		}
 	}
+	// Nome de arquivo do Atlas começa com timestamp, então ordem
+	// lexicográfica é ordem cronológica.
 	sort.Strings(files)
 
 	for _, file := range files {
@@ -82,20 +107,11 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("lendo %s: %w", file, err)
 		}
-		// IF NOT EXISTS não vem na migration gerada (ela assume histórico
-		// controlado), então a criação repetida é tolerada aqui.
-		if _, err := database.ExecContext(ctx, string(statements)); err != nil && !isAlreadyExists(err) {
+		if _, err := database.ExecContext(ctx, string(statements)); err != nil {
 			return fmt.Errorf("executando %s: %w", file, err)
 		}
 	}
 	return nil
-}
-
-// isAlreadyExists reconhece o erro de objeto duplicado do Postgres (42P07 /
-// 42710) — é o sinal de que a migration já havia sido aplicada.
-func isAlreadyExists(err error) bool {
-	message := err.Error()
-	return strings.Contains(message, "already exists")
 }
 
 // truncateUsers limpa as linhas antes de cada teste.
