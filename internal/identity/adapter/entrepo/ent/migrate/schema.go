@@ -14,6 +14,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "email", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
+		{Name: "avatar_url", Type: field.TypeString, Default: ""},
 		{Name: "external_provider", Type: field.TypeString},
 		{Name: "external_subject", Type: field.TypeString},
 		{Name: "registered_at", Type: field.TypeTime},
@@ -29,7 +30,7 @@ var (
 			{
 				Name:    "user_external_provider_external_subject",
 				Unique:  true,
-				Columns: []*schema.Column{UsersColumns[3], UsersColumns[4]},
+				Columns: []*schema.Column{UsersColumns[4], UsersColumns[5]},
 			},
 			{
 				Name:    "user_email",

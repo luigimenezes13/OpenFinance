@@ -78,21 +78,22 @@ func (u *SignInUseCase) Execute(ctx context.Context, input SignInInput) (SignInO
 	}
 
 	name := resolveName(verified.Name, email)
+	avatar := resolveAvatar(verified.AvatarURL)
 
 	existing, err := u.users.FindByExternalIdentity(ctx, external)
 	if errors.Is(err, identity.ErrNotFound) {
-		return u.register(ctx, email, name, external)
+		return u.register(ctx, email, name, avatar, external)
 	}
 	if err != nil {
 		return SignInOutput{}, err
 	}
 
-	return u.signInExisting(ctx, existing, email, name)
+	return u.signInExisting(ctx, existing, email, name, avatar)
 }
 
 // register provisiona o usuário no primeiro acesso e publica Registered.
-func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name string, external identity.ExternalIdentity) (SignInOutput, error) {
-	registered, err := identity.Register(email, name, external)
+func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name string, avatar identity.AvatarURL, external identity.ExternalIdentity) (SignInOutput, error) {
+	registered, err := identity.Register(email, name, avatar, external)
 	if err != nil {
 		return SignInOutput{}, err
 	}
@@ -116,8 +117,8 @@ func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name
 // Só grava quando MUDOU: o perfil chega em todo login, e persistir sempre
 // seria uma escrita por request sem fato novo — a decisão de "mudou?" mora
 // no aggregate (SyncProfile), não aqui.
-func (u *SignInUseCase) signInExisting(ctx context.Context, existing *identity.User, email identity.Email, name string) (SignInOutput, error) {
-	changed, err := existing.SyncProfile(email, name)
+func (u *SignInUseCase) signInExisting(ctx context.Context, existing *identity.User, email identity.Email, name string, avatar identity.AvatarURL) (SignInOutput, error) {
+	changed, err := existing.SyncProfile(email, name, avatar)
 	if err != nil {
 		return SignInOutput{}, err
 	}
@@ -144,6 +145,19 @@ func resolveName(providedName string, email identity.Email) string {
 
 	localPart, _, _ := strings.Cut(email.String(), "@")
 	return localPart
+}
+
+// resolveAvatar constrói o VO do avatar, tratando URL inválida como AUSENTE.
+//
+// Diferente do e-mail, avatar torto não impede o login: é dado cosmético, e
+// recusar a entrada de alguém porque o provedor mandou uma URL estranha seria
+// desproporcional. O próximo login corrige se a URL voltar ao normal.
+func resolveAvatar(rawURL string) identity.AvatarURL {
+	avatar, err := identity.NewAvatarURL(rawURL)
+	if err != nil {
+		return identity.AvatarURL{}
+	}
+	return avatar
 }
 
 // toSignInOutput projeta o aggregate no DTO de saída.

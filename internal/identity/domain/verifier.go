@@ -14,9 +14,13 @@ type VerifiedIdentity struct {
 	Provider string
 	Subject  string
 
-	// Email e Name são PERFIL, e vêm do provedor a cada login.
+	// Email, Name e AvatarURL são PERFIL, e vêm do provedor a cada login.
 	Email string
 	Name  string
+
+	// AvatarURL é o claim `picture`. Vazio é normal: depende do escopo
+	// `profile` ter sido concedido e de a conta ter foto.
+	AvatarURL string
 
 	// EmailVerified é a atestação do provedor de que aquele e-mail é da
 	// pessoa. Vem separado do Email de propósito: sem esse campo, o use

@@ -106,6 +106,7 @@ func googleIdentity() identity.VerifiedIdentity {
 		Subject:       "google-sub-123",
 		Email:         "Luigi@Example.com",
 		Name:          "Luigi Menezes",
+		AvatarURL:     "https://lh3.googleusercontent.com/a/foto.jpg",
 		EmailVerified: true,
 	}
 }
@@ -117,7 +118,8 @@ func mustUser(t *testing.T, verified identity.VerifiedIdentity) *identity.User {
 	require.NoError(t, err)
 	external, err := identity.NewExternalIdentity(verified.Provider, verified.Subject)
 	require.NoError(t, err)
-	registered, err := identity.Register(email, verified.Name, external)
+	avatar, _ := identity.NewAvatarURL(verified.AvatarURL)
+	registered, err := identity.Register(email, verified.Name, avatar, external)
 	require.NoError(t, err)
 	registered.ClearEvents()
 	return registered
@@ -364,4 +366,72 @@ func TestPropagaErroDeInfra(t *testing.T) {
 		require.Len(t, users.saved, 1, "o Save já tinha acontecido")
 		assert.Len(t, users.saved[0].Events(), 1, "evento não despachado fica no aggregate")
 	})
+}
+
+// TestAvatarSincronizadoNoLogin: a pessoa trocou a foto no Google e espera
+// ver a nova.
+func TestAvatarSincronizadoNoLogin(t *testing.T) {
+	t.Parallel()
+
+	existing := mustUser(t, googleIdentity())
+	users := newFakeUsers(existing)
+
+	updated := googleIdentity()
+	updated.AvatarURL = "https://lh3.googleusercontent.com/a/nova.jpg"
+	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: updated}, &fakeDispatcher{})
+
+	_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+
+	require.NoError(t, err)
+	require.Len(t, users.saved, 1, "avatar novo é mudança de perfil, então grava")
+	avatar := users.saved[0].Avatar()
+	assert.Equal(t, "https://lh3.googleusercontent.com/a/nova.jpg", avatar.String())
+}
+
+// TestAvatarInvalidoNaoImpedeLogin é a decisão de PROPORCIONALIDADE: avatar é
+// dado cosmético, e recusar a entrada porque o provedor mandou uma URL
+// estranha (ou perigosa) seria desproporcional. Entra sem avatar.
+func TestAvatarInvalidoNaoImpedeLogin(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"javascript:alert(1)", "/relativo.png", "", "   "}
+
+	for _, rawAvatar := range cases {
+		t.Run("avatar:"+rawAvatar, func(t *testing.T) {
+			t.Parallel()
+
+			verified := googleIdentity()
+			verified.AvatarURL = rawAvatar
+			users := newFakeUsers()
+			useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, &fakeDispatcher{})
+
+			output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+
+			require.NoError(t, err)
+			assert.True(t, output.Registered)
+			require.Len(t, users.saved, 1)
+			avatar := users.saved[0].Avatar()
+			assert.True(t, avatar.IsZero(), "avatar inválido virou ausência, não erro")
+		})
+	}
+}
+
+// TestAvatarRemovidoNoProvedor: apagou a foto no Google, a nossa cópia
+// acompanha.
+func TestAvatarRemovidoNoProvedor(t *testing.T) {
+	t.Parallel()
+
+	existing := mustUser(t, googleIdentity())
+	users := newFakeUsers(existing)
+
+	withoutAvatar := googleIdentity()
+	withoutAvatar.AvatarURL = ""
+	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: withoutAvatar}, &fakeDispatcher{})
+
+	_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+
+	require.NoError(t, err)
+	require.Len(t, users.saved, 1)
+	avatar := users.saved[0].Avatar()
+	assert.True(t, avatar.IsZero())
 }

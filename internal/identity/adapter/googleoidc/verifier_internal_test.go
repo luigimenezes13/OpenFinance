@@ -172,3 +172,29 @@ func TestVerifyTraduzFalhaDaBiblioteca(t *testing.T) {
 
 	require.ErrorIs(t, err, identity.ErrTokenExpired)
 }
+
+// TestMapeiaClaimPicture: o Google chama a foto de `picture`, e é esse o
+// nome que precisa ser lido — errar o nome do claim resultaria em todo mundo
+// sem avatar, silenciosamente.
+func TestMapeiaClaimPicture(t *testing.T) {
+	t.Parallel()
+
+	verified := toVerifiedIdentity(&idtoken.Payload{Subject: "sub-1", Claims: map[string]any{
+		"email":   "luigi@example.com",
+		"picture": "https://lh3.googleusercontent.com/a/ACg8ocK=s96-c",
+	}})
+
+	assert.Equal(t, "https://lh3.googleusercontent.com/a/ACg8ocK=s96-c", verified.AvatarURL)
+}
+
+// TestPictureAusenteViraVazio: conta sem foto, ou escopo `profile` não
+// concedido, é caso normal — não erro.
+func TestPictureAusenteViraVazio(t *testing.T) {
+	t.Parallel()
+
+	verified := toVerifiedIdentity(&idtoken.Payload{Subject: "sub-1", Claims: map[string]any{
+		"email": "luigi@example.com",
+	}})
+
+	assert.Empty(t, verified.AvatarURL)
+}
