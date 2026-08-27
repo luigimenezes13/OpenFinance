@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 )
 
 // RegisterRoutes monta as rotas do BC. Um lugar só declara o desenho da
@@ -19,6 +17,7 @@ import (
 func RegisterRoutes(
 	router *gin.Engine,
 	database Pinger,
+	authenticate gin.HandlerFunc,
 	accounts *AccountHandler,
 	transactions *TransactionHandler,
 	categories *CategoryHandler,
@@ -27,7 +26,11 @@ func RegisterRoutes(
 	// não manda header de usuário.
 	router.GET("/healthz", healthz(database))
 
-	authenticated := router.Group("/v1", ginmiddleware.UserContext())
+	// O middleware de identidade chega PRONTO por parâmetro: este package é
+	// o Financial Tracking, e ele não tem por que conhecer o bounded context
+	// Identity nem como uma credencial é verificada. Ele exige apenas que
+	// alguém tenha resolvido o usuário antes.
+	authenticated := router.Group("/v1", authenticate)
 
 	authenticated.POST("/accounts", accounts.Create)
 	authenticated.POST("/categories", categories.Create)

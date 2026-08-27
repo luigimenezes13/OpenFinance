@@ -1,18 +1,16 @@
 // Package ginmiddleware é a borda de ENTRADA do bounded context Identity:
-// resolve quem está fazendo a requisição e injeta a identidade no
+// resolve quem está fazendo a requisição e injeta a identidade LOCAL no
 // context.Context que atravessa as camadas.
 //
-// ESTADO DO V1, explícito: o middleware CONFIA no header X-User-Id. Não há
-// autenticação — nem token, nem sessão, nem o aggregate User do spec §3.
-// Isso é aceitável só em desenvolvimento, e está aqui por dois motivos: o
-// contrato pra dentro (use case recebe uuid já parseado no context) é o
-// mesmo que valeria com JWT, e a troca de "confia no header" por "valida
-// token" não toca handler nem use case — só este arquivo.
+// O que atravessa pra dentro é só um uuid. Nem o token, nem o e-mail, nem o
+// subject do provedor — quem precisa saber "de quem é esta conta" precisa de
+// uma identidade, não de um perfil nem de uma credencial.
 package ginmiddleware
 
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,43 +18,87 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/platform/httperror"
 )
 
-// HeaderUserID é o header que carrega a identidade no v1.
-const HeaderUserID = "X-User-Id"
+// Header e esquema de autenticação.
+const (
+	authorizationHeader = "Authorization"
+	bearerScheme        = "bearer"
+)
 
 // contextKey é um tipo PRIVADO usado como chave de context. String solta
 // como chave é colisão esperando acontecer: qualquer package poderia
-// escrever na mesma chave sem saber. Com tipo privado, só este package
-// consegue produzir a chave.
+// escrever na mesma chave sem saber.
 type contextKey struct{}
 
-// UserContext extrai e valida o X-User-Id, injeta no context da request e
-// segue. Header ausente ou mal formado morre aqui com 401 — é a fronteira
-// de tradução: string → uuid acontece na borda, nunca no domínio.
-func UserContext() gin.HandlerFunc {
-	return func(context *gin.Context) {
-		raw := context.GetHeader(HeaderUserID)
-		if raw == "" {
-			context.AbortWithStatusJSON(http.StatusUnauthorized,
-				httperror.BadRequest("header "+HeaderUserID+" é obrigatório"))
+// ResolveUser transforma um token cru na identidade LOCAL do portador.
+//
+// É um tipo função, não uma interface de um método: em Go a função já é a
+// abstração menor possível, e assim o teste passa uma closure em vez de
+// declarar um tipo só pra satisfazer contrato. A implementação real vem de
+// UserResolverFrom, sobre o use case de sign-in.
+type ResolveUser func(ctx context.Context, rawToken string) (uuid.UUID, error)
+
+// Authenticate exige um Bearer token válido, resolve o usuário local e o
+// injeta no context da request.
+//
+// Erro de resolução é traduzido pela MESMA tabela do resto da API
+// (httperror), não por status escolhido aqui: token expirado tem que
+// responder o mesmo 401/token_expired venha ele deste middleware ou de
+// qualquer outro lugar.
+func Authenticate(resolve ResolveUser) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		rawToken, ok := bearerToken(ginContext.GetHeader(authorizationHeader))
+		if !ok {
+			// Credencial ausente ou mal formada usa o MESMO código de
+			// "token inválido": distinguir "não mandou" de "mandou errado"
+			// não muda a ação do cliente e só dá informação a quem sonda.
+			ginContext.AbortWithStatusJSON(http.StatusUnauthorized, httperror.Body{
+				Error: httperror.Detail{Code: "invalid_token", Message: "credencial ausente ou mal formada"},
+			})
 			return
 		}
 
-		userID, err := uuid.Parse(raw)
+		userID, err := resolve(ginContext.Request.Context(), rawToken)
 		if err != nil {
-			context.AbortWithStatusJSON(http.StatusUnauthorized,
-				httperror.BadRequest("header "+HeaderUserID+" não é um uuid válido"))
+			status, body := httperror.Translate(err)
+			ginContext.AbortWithStatusJSON(status, body)
 			return
 		}
 
 		// O uuid vai no context da REQUEST (não só no gin.Context) porque é
 		// o context.Context que desce pros use cases — eles não conhecem gin.
-		context.Request = context.Request.WithContext(withUserID(context.Request.Context(), userID))
-		context.Next()
+		ginContext.Request = ginContext.Request.WithContext(
+			ContextWithUserID(ginContext.Request.Context(), userID))
+		ginContext.Next()
 	}
 }
 
-// withUserID guarda a identidade no context.
-func withUserID(parent context.Context, userID uuid.UUID) context.Context {
+// bearerToken extrai o token do header Authorization. O esquema é comparado
+// sem diferenciar caixa porque a RFC 7235 o define case-insensitive — e
+// cliente mandando "bearer" minúsculo é comum o bastante pra não valer um
+// 401 misterioso.
+func bearerToken(header string) (string, bool) {
+	scheme, credentials, found := strings.Cut(strings.TrimSpace(header), " ")
+	if !found {
+		return "", false
+	}
+	if !strings.EqualFold(scheme, bearerScheme) {
+		return "", false
+	}
+
+	token := strings.TrimSpace(credentials)
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+// ContextWithUserID guarda a identidade no context.
+//
+// Exportada porque a borda de OUTRO bounded context (os testes do
+// ginhandler) precisa montar um context autenticado sem forjar um token do
+// Google. A chave continua privada — quem não passa por aqui não consegue
+// escrever nela, e é isso que importa.
+func ContextWithUserID(parent context.Context, userID uuid.UUID) context.Context {
 	return context.WithValue(parent, contextKey{}, userID)
 }
 
