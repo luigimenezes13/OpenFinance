@@ -2,7 +2,6 @@ package ginhandler
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"time"
 
@@ -19,7 +18,7 @@ import (
 // silencioso, e agrupar torna isso impossível por construção.
 func RegisterRoutes(
 	router *gin.Engine,
-	database *sql.DB,
+	database Pinger,
 	accounts *AccountHandler,
 	transactions *TransactionHandler,
 	categories *CategoryHandler,
@@ -42,10 +41,20 @@ func RegisterRoutes(
 	// casos de uso de consulta.
 }
 
+// Pinger é o que a rota de saúde precisa do banco: UMA operação.
+//
+// A rota recebia *sql.DB concreto, o que a tornava impossível de testar sem
+// um Postgres de verdade — e um health check é justamente o que precisa ter
+// teste do caminho de FALHA. A interface é declarada aqui, no consumidor, do
+// tamanho exato do uso (ISP): *sql.DB a satisfaz sem saber que ela existe.
+type Pinger interface {
+	PingContext(ctx context.Context) error
+}
+
 // healthz responde saúde do processo COM checagem de dependência: um
 // /healthz que só devolve 200 mente quando o banco cai — o orquestrador
 // mantém no ar um processo que não atende ninguém.
-func healthz(database *sql.DB) gin.HandlerFunc {
+func healthz(database Pinger) gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
 		ctx, cancel := context.WithTimeout(ginContext.Request.Context(), healthTimeout)
 		defer cancel()
