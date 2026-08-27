@@ -199,3 +199,54 @@ func TestRecordTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordTransactionNuncaMexeNoSaldo é TESTE DE REGRESSÃO de uma regra de
+// produto, não de um detalhe de implementação: o saldo entra no sistema por
+// um caminho só, a importação Open Finance (firmado em 2026-08-27).
+//
+// O banco é a autoridade sobre quanto existe na conta. Se um dia alguém
+// "consertar" isto somando os lançamentos no saldo, o número passa a
+// discordar do extrato bancário — e o usuário confia no errado. É esse
+// conserto bem-intencionado que este teste existe pra impedir.
+func TestRecordTransactionNuncaMexeNoSaldo(t *testing.T) {
+	t.Parallel()
+
+	ownerID := uuid.New()
+	targetAccount := newManualAccount(t, ownerID, "BRL")
+	accountID := targetAccount.ID()
+
+	// Parte de um saldo NÃO-ZERO, como se tivesse vindo de uma importação:
+	// com saldo zero, um teste passaria mesmo se o código somasse errado e
+	// resultasse em zero por coincidência.
+	// asOf DEPOIS do instante em que a conta nasceu: o aggregate recusa
+	// saldo que volta no tempo (ErrStaleBalance), então um asOf no passado
+	// aqui faria o setup do próprio teste falhar.
+	initial, err := account.NewBalance(mustMoney(t, 1_000_00, "BRL"), time.Now().Add(time.Second))
+	require.NoError(t, err)
+	require.NoError(t, targetAccount.UpdateBalance(initial))
+	targetAccount.ClearEvents()
+
+	accounts := newFakeAccounts(targetAccount)
+	transactions := newFakeTransactions()
+	useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+
+	// Vários lançamentos, entrada e saída.
+	for _, amount := range []int64{-45_50, -120_00, 300_00} {
+		_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
+			UserID:      ownerID,
+			AccountID:   accountID.UUID(),
+			Amount:      amount,
+			OccurredAt:  time.Now().Add(-time.Minute),
+			Description: "Lançamento",
+		})
+		require.NoError(t, err)
+	}
+
+	require.Len(t, transactions.saved, 3, "as transações entraram")
+
+	balance := targetAccount.Balance()
+	money := balance.Money()
+	assert.Equal(t, int64(1_000_00), money.Amount(), "o saldo continua exatamente o que o provedor informou")
+	assert.Empty(t, accounts.saved, "a conta nem é regravada: este use case só LÊ a conta")
+	assert.Empty(t, targetAccount.Events(), "nenhum AccountBalanceUpdated foi emitido")
+}

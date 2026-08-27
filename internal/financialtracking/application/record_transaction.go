@@ -62,10 +62,12 @@ func NewRecordTransactionUseCase(transactions transaction.Repository, accounts a
 // Execute orquestra o lançamento: resolve identidades, carrega a conta pra
 // checar dono e moeda, delega as invariantes ao aggregate, persiste.
 //
-// O SALDO da conta NÃO é mexido aqui (decisão de 2026-08-25, seguindo o
-// spec): saldo de conta conectada é fato do provider, e derivar saldo de
-// lançamentos manuais é outro comportamento — entra como use case próprio
-// no backlog, não como efeito colateral escondido deste.
+// O SALDO da conta NÃO é mexido aqui, e isso é REGRA, não pendência
+// (firmada em 2026-08-27): saldo entra no sistema por um caminho só, a
+// importação Open Finance. O banco é a autoridade sobre quanto existe na
+// conta; derivar saldo dos lançamentos que o usuário digitou produziria um
+// número que discorda do extrato bancário, e o usuário confiaria no errado.
+// Há teste de regressão garantindo que este use case não toca em saldo.
 func (u *RecordTransactionUseCase) Execute(ctx context.Context, input RecordTransactionInput) (RecordTransactionOutput, error) {
 	userID, err := shared.NewUserID(input.UserID)
 	if err != nil {

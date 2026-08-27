@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/openfinance"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 )
@@ -279,8 +280,9 @@ func TestImportFromProvider(t *testing.T) {
 	assert.Len(t, body["transaction_ids"], 2)
 	assert.Len(t, server.transactions.stored, 2)
 
-	require.Len(t, server.dispatcher.dispatched, 2, "cada transação importada emite Imported")
+	require.Len(t, server.dispatcher.dispatched, 3, "2 Imported + 1 BalanceUpdated")
 	assert.Equal(t, transaction.EventTypeImported, server.dispatcher.dispatched[0].EventName())
+	assert.Equal(t, account.EventTypeBalanceUpdated, server.dispatcher.dispatched[2].EventName())
 }
 
 // TestImportFromProviderRecusa cobre as recusas próprias do import,
@@ -388,4 +390,59 @@ func TestImportFromProviderSintaxe(t *testing.T) {
 			assert.Empty(t, server.transactions.stored)
 		})
 	}
+}
+
+// TestSaldoSoMudaPorImportacao é o teste AUTOMÁTICO da regra, na borda HTTP:
+// nenhuma quantidade de lançamentos manuais move o saldo, e a importação
+// move. É o mesmo contrato do teste de regressão da application, verificado
+// aqui pelo caminho que o cliente realmente usa.
+func TestSaldoSoMudaPorImportacao(t *testing.T) {
+	ownerID := uuid.New()
+	connected := newConnectedAccount(t, ownerID, "mock")
+	accountID := connected.ID()
+
+	server := newTestServer(t, func(server *testServer) {
+		server.accounts = newFakeAccounts(connected)
+		server.provider = &fakeProvider{
+			name: "mock",
+			transactions: []openfinance.ProviderTransaction{
+				{ProviderTransactionID: "tx-1", Description: "Uber", AmountInCents: -2350, CurrencyCode: "BRL", OccurredAt: time.Now().Add(-24 * time.Hour)},
+			},
+			balance: &openfinance.ProviderBalance{AmountInCents: 7_777_00, CurrencyCode: "BRL", AsOf: time.Now()},
+		}
+	})
+
+	saldoAtual := func() int64 {
+		balance := connected.Balance()
+		money := balance.Money()
+		return money.Amount()
+	}
+
+	require.Zero(t, saldoAtual(), "conta nasce zerada")
+
+	// Três lançamentos manuais pela API.
+	for _, amount := range []int64{-45_50, -120_00, 300_00} {
+		recorder := server.request(t, http.MethodPost, "/v1/transactions", ownerID.String(), map[string]any{
+			"account_id":  accountID.String(),
+			"amount":      amount,
+			"occurred_at": "2026-08-20T10:00:00Z",
+			"description": "Lançamento",
+		})
+		require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+	}
+
+	require.Len(t, server.transactions.stored, 3)
+	assert.Zero(t, saldoAtual(), "lançamento manual NÃO move o saldo")
+
+	// A importação move.
+	recorder := server.request(t, http.MethodPost, "/v1/transactions/import", ownerID.String(), map[string]any{
+		"account_id": accountID.String(),
+	})
+
+	require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+	body := decode(t, recorder)
+	assert.Equal(t, float64(7_777_00), body["balance"])
+	assert.Equal(t, "BRL", body["currency"])
+	assert.Equal(t, true, body["balance_applied"])
+	assert.Equal(t, int64(7_777_00), saldoAtual(), "o saldo é o que o provedor informou, não a soma dos lançamentos")
 }

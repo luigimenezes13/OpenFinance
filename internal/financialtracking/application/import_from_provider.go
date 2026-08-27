@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,12 +25,23 @@ type ImportFromProviderInput struct {
 }
 
 // ImportFromProviderOutput é a projeção do resultado: quais transações
-// nasceram nesta importação. Lista vazia é resultado legítimo (nada novo no
-// provider), não erro.
+// nasceram nesta importação e o saldo que veio do provedor. Lista vazia é
+// resultado legítimo (nada novo no provider), não erro.
 type ImportFromProviderOutput struct {
 	AccountID      string
 	Provider       string
 	TransactionIDs []string
+
+	// Balance é o saldo informado pelo provedor, em centavos, e Currency a
+	// moeda dele. É o ÚNICO caminho pelo qual o saldo de uma conta muda no
+	// sistema (decisão de 2026-08-27).
+	Balance  int64
+	Currency string
+
+	// BalanceApplied é false quando o provedor devolveu um saldo mais ANTIGO
+	// que o já registrado e ele foi ignorado. Sai no output em vez de virar
+	// erro porque não é falha: é sync fora de ordem, que acontece.
+	BalanceApplied bool
 }
 
 // ImportFromProviderUseCase importa transações de uma conta conectada.
@@ -113,11 +125,80 @@ func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFro
 		transactionIDs = append(transactionIDs, imported.ID().String())
 	}
 
+	// O saldo é aplicado DEPOIS das transações: se a importação abortar no
+	// meio, o saldo antigo continua valendo em vez de anunciar um número que
+	// não corresponde aos lançamentos que entraram. Na próxima importação os
+	// dois se alinham.
+	providerBalance, applied, err := u.applyProviderBalance(ctx, targetAccount, currency, connection.providerAccountID)
+	if err != nil {
+		return ImportFromProviderOutput{}, err
+	}
+
 	return ImportFromProviderOutput{
 		AccountID:      accountID.String(),
 		Provider:       connection.provider,
 		TransactionIDs: transactionIDs,
+		Balance:        providerBalance.AmountInCents,
+		Currency:       providerBalance.CurrencyCode,
+		BalanceApplied: applied,
 	}, nil
+}
+
+// applyProviderBalance busca o saldo no provedor e o registra na conta.
+//
+// Este é o ÚNICO lugar do sistema que muda saldo de conta — nem o lançamento
+// manual, nem a categorização mexem nele (decisão de 2026-08-27). A razão: o
+// banco é a autoridade sobre quanto existe na conta, e derivar saldo dos
+// lançamentos digitados produziria um número que discorda do extrato
+// bancário, com o usuário confiando no errado.
+func (u *ImportFromProviderUseCase) applyProviderBalance(
+	ctx context.Context,
+	targetAccount *account.Account,
+	currency shared.Currency,
+	providerAccountID string,
+) (openfinance.ProviderBalance, bool, error) {
+	providerBalance, err := u.provider.FetchBalance(ctx, providerAccountID)
+	if err != nil {
+		return openfinance.ProviderBalance{}, false, err
+	}
+
+	// Moeda divergente é dado corrompido na fronteira, igual às transações.
+	if providerBalance.CurrencyCode != currency.Code() {
+		return openfinance.ProviderBalance{}, false, account.ErrCurrencyMismatch
+	}
+
+	money, err := shared.NewMoney(providerBalance.AmountInCents, currency)
+	if err != nil {
+		return openfinance.ProviderBalance{}, false, err
+	}
+	updated, err := account.NewBalance(money, providerBalance.AsOf)
+	if err != nil {
+		return openfinance.ProviderBalance{}, false, err
+	}
+
+	// Saldo mais antigo que o registrado é IGNORADO, não é erro: webhooks e
+	// syncs chegam fora de ordem, e o aggregate recusa o retrocesso
+	// (ErrStaleBalance, decisão de 2026-07-04). Quem decide o que fazer com
+	// a recusa é o use case — e o que faz sentido é seguir com o saldo mais
+	// recente que já temos.
+	if err := targetAccount.UpdateBalance(updated); err != nil {
+		if errors.Is(err, account.ErrStaleBalance) {
+			return providerBalance, false, nil
+		}
+		return openfinance.ProviderBalance{}, false, err
+	}
+
+	if err := u.accounts.Save(ctx, targetAccount); err != nil {
+		return openfinance.ProviderBalance{}, false, err
+	}
+
+	// UpdateBalance emitiu AccountBalanceUpdated: Save → Dispatch →
+	// ClearEvents, a mesma ordem de sempre.
+	if err := dispatchAndClear(ctx, u.dispatcher, targetAccount); err != nil {
+		return openfinance.ProviderBalance{}, false, err
+	}
+
+	return providerBalance, true, nil
 }
 
 // connection é o par (provider, id da conta lá) extraído do VO Source.

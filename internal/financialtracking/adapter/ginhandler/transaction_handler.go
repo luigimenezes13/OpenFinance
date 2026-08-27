@@ -242,6 +242,17 @@ type importResponse struct {
 	Provider       string   `json:"provider"`
 	TransactionIDs []string `json:"transaction_ids"`
 	ImportedCount  int      `json:"imported_count"`
+
+	// O saldo vai na resposta porque a importação é o ÚNICO caminho pelo
+	// qual ele muda: quem chamou acabou de causar a mudança e precisa do
+	// número novo sem uma segunda requisição.
+	Balance  int64  `json:"balance"`
+	Currency string `json:"currency"`
+
+	// false = o provedor devolveu saldo mais antigo que o registrado e ele
+	// foi ignorado. Sai explícito pra a UI não anunciar "atualizado agora"
+	// quando nada mudou.
+	BalanceApplied bool `json:"balance_applied"`
 }
 
 // toImportResponse traduz o Output do use case.
@@ -251,5 +262,8 @@ func toImportResponse(output application.ImportFromProviderOutput) importRespons
 		Provider:       output.Provider,
 		TransactionIDs: output.TransactionIDs,
 		ImportedCount:  len(output.TransactionIDs),
+		Balance:        output.Balance,
+		Currency:       output.Currency,
+		BalanceApplied: output.BalanceApplied,
 	}
 }
