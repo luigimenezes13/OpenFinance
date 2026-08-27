@@ -49,7 +49,12 @@ services:
       # `postgres` é o hostname do serviço na rede do compose, e a porta é a
       # INTERNA (5432) — a 55432 é o mapeamento pro host.
       DATABASE_URL: postgres://financial:financial@postgres:5432/financial_manager?sslmode=disable
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?defina GOOGLE_CLIENT_ID}
+      # Sem a forma `:?` (que aborta se a variável faltar): o compose
+      # interpola o arquivo INTEIRO mesmo quando este serviço não é
+      # selecionado, então `:?` quebrava `docker compose up postgres`. A
+      # validação fica onde já estava: a própria aplicação recusa subir sem
+      # GOOGLE_CLIENT_ID, com mensagem explícita.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       HTTP_ADDR: ":8080"
       GIN_MODE: release
