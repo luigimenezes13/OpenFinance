@@ -41,6 +41,11 @@ func (User) Fields() []ent.Field {
 		field.String("email"),
 		field.String("name"),
 
+		// Avatar é opcional: default vazio em vez de coluna anulável,
+		// porque "sem avatar" e "vazio" são a mesma coisa aqui — NULL só
+		// acrescentaria um terceiro estado sem significado próprio.
+		field.String("avatar_url").Default(""),
+
 		// Âncora do usuário. Immutable no schema porque trocar o subject
 		// seria trocar de pessoa — e o UpdateNewValues do upsert respeita
 		// isso, então nem um bug no mapper consegue reescrever a âncora.

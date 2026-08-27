@@ -63,6 +63,7 @@ type User struct {
 	id           UserID
 	email        Email
 	name         string
+	avatar       AvatarURL // zero value = sem avatar
 	external     ExternalIdentity
 	registeredAt time.Time
 }
@@ -71,7 +72,10 @@ type User struct {
 //
 // O nome do método é do negócio, não técnico: o fato é "um usuário se
 // registrou", e é isso que o evento carrega. `New` diria menos.
-func Register(email Email, name string, external ExternalIdentity) (*User, error) {
+// O avatar entra como parâmetro (e não por um setter depois) porque é dado
+// que chega junto no login: construir o usuário sem ele e completar em
+// seguida criaria um instante em que o aggregate existe incompleto.
+func Register(email Email, name string, avatar AvatarURL, external ExternalIdentity) (*User, error) {
 	if email.IsZero() {
 		return nil, ErrInvalidEmail
 	}
@@ -87,6 +91,7 @@ func Register(email Email, name string, external ExternalIdentity) (*User, error
 		id:           NewUserID(),
 		email:        email,
 		name:         canonicalName,
+		avatar:       avatar, // pode ser zero value: sem avatar é válido
 		external:     external,
 		registeredAt: time.Now(),
 	}
@@ -119,6 +124,13 @@ func (u *User) Name() string {
 	return u.name
 }
 
+// Avatar retorna a foto de perfil, ou o zero value se o usuário não tem uma.
+// Sem comma-ok: o VO já expressa a ausência com IsZero, e devolver
+// (AvatarURL, bool) daria dois jeitos de dizer a mesma coisa.
+func (u *User) Avatar() AvatarURL {
+	return u.avatar
+}
+
 // ExternalIdentity retorna a referência no provedor de identidade.
 func (u *User) ExternalIdentity() ExternalIdentity {
 	return u.external
@@ -138,7 +150,7 @@ func (u *User) RegisteredAt() time.Time {
 //
 // A identidade externa NÃO é sincronizável: o subject é a âncora do
 // usuário, e permitir trocá-lo seria permitir assumir a conta de outro.
-func (u *User) SyncProfile(email Email, name string) (bool, error) {
+func (u *User) SyncProfile(email Email, name string, avatar AvatarURL) (bool, error) {
 	if email.IsZero() {
 		return false, ErrInvalidEmail
 	}
@@ -147,11 +159,15 @@ func (u *User) SyncProfile(email Email, name string) (bool, error) {
 		return false, err
 	}
 
-	if u.email.Equals(email) && u.name == canonicalName {
+	if u.email.Equals(email) && u.name == canonicalName && u.avatar.Equals(avatar) {
 		return false, nil
 	}
 
 	u.email = email
 	u.name = canonicalName
+	// Avatar zerado SOBRESCREVE o anterior: se a pessoa removeu a foto no
+	// Google, o certo é a nossa cópia refletir isso. Preservar o valor antigo
+	// deixaria o sistema mostrando uma foto que o usuário decidiu apagar.
+	u.avatar = avatar
 	return true, nil
 }

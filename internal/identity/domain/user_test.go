@@ -25,9 +25,21 @@ func mustExternalIdentity(t *testing.T, subject string) identity.ExternalIdentit
 	return external
 }
 
+func mustAvatar(t *testing.T, raw string) identity.AvatarURL {
+	t.Helper()
+	avatar, err := identity.NewAvatarURL(raw)
+	require.NoError(t, err)
+	return avatar
+}
+
 func newValidUser(t *testing.T) *identity.User {
 	t.Helper()
-	registered, err := identity.Register(mustEmail(t, "luigi@example.com"), "Luigi", mustExternalIdentity(t, "google-sub-123"))
+	registered, err := identity.Register(
+		mustEmail(t, "luigi@example.com"),
+		"Luigi",
+		mustAvatar(t, "https://lh3.googleusercontent.com/a/foto.jpg"),
+		mustExternalIdentity(t, "google-sub-123"),
+	)
 	require.NoError(t, err)
 	return registered
 }
@@ -89,7 +101,7 @@ func TestRegisterRecusa(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			registered, err := identity.Register(testCase.email, testCase.userName, testCase.external)
+			registered, err := identity.Register(testCase.email, testCase.userName, identity.AvatarURL{}, testCase.external)
 
 			require.ErrorIs(t, err, testCase.wantErr)
 			assert.Nil(t, registered)
@@ -106,7 +118,7 @@ func TestSyncProfile(t *testing.T) {
 		t.Parallel()
 		target := newValidUser(t)
 
-		changed, err := target.SyncProfile(mustEmail(t, "LUIGI@example.com "), "Luigi")
+		changed, err := target.SyncProfile(mustEmail(t, "LUIGI@example.com "), "Luigi", target.Avatar())
 
 		require.NoError(t, err)
 		assert.False(t, changed, "e-mail canônico igual e nome igual: nada a gravar")
@@ -116,7 +128,7 @@ func TestSyncProfile(t *testing.T) {
 		t.Parallel()
 		target := newValidUser(t)
 
-		changed, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "Luigi")
+		changed, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "Luigi", target.Avatar())
 
 		require.NoError(t, err)
 		assert.True(t, changed)
@@ -127,7 +139,7 @@ func TestSyncProfile(t *testing.T) {
 		t.Parallel()
 		target := newValidUser(t)
 
-		changed, err := target.SyncProfile(mustEmail(t, "luigi@example.com"), "Luigi Menezes")
+		changed, err := target.SyncProfile(mustEmail(t, "luigi@example.com"), "Luigi Menezes", target.Avatar())
 
 		require.NoError(t, err)
 		assert.True(t, changed)
@@ -138,7 +150,7 @@ func TestSyncProfile(t *testing.T) {
 		t.Parallel()
 		target := newValidUser(t)
 
-		changed, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "  ")
+		changed, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "  ", target.Avatar())
 
 		require.ErrorIs(t, err, identity.ErrInvalidName)
 		assert.False(t, changed)
@@ -150,11 +162,66 @@ func TestSyncProfile(t *testing.T) {
 		target := newValidUser(t)
 		target.ClearEvents()
 
-		_, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "Outro Nome")
+		_, err := target.SyncProfile(mustEmail(t, "novo@example.com"), "Outro Nome", target.Avatar())
 
 		require.NoError(t, err)
 		assert.Empty(t, target.Events(), "nenhum consumidor se importa com troca de perfil no v1")
 	})
+}
+
+// TestSyncProfileAvatar cobre as três transições do avatar, incluindo a
+// remoção — se a pessoa apagou a foto no Google, mostrar a antiga seria
+// exibir algo que ela decidiu apagar.
+func TestSyncProfileAvatar(t *testing.T) {
+	t.Parallel()
+
+	t.Run("troca de avatar", func(t *testing.T) {
+		t.Parallel()
+		target := newValidUser(t)
+
+		changed, err := target.SyncProfile(target.Email(), target.Name(), mustAvatar(t, "https://lh3.googleusercontent.com/a/nova.jpg"))
+
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.Equal(t, "https://lh3.googleusercontent.com/a/nova.jpg", target.Avatar().String())
+	})
+
+	t.Run("remoção do avatar sobrescreve o anterior", func(t *testing.T) {
+		t.Parallel()
+		target := newValidUser(t)
+
+		changed, err := target.SyncProfile(target.Email(), target.Name(), identity.AvatarURL{})
+
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.True(t, target.Avatar().IsZero())
+	})
+
+	t.Run("mesmo avatar não conta como mudança", func(t *testing.T) {
+		t.Parallel()
+		target := newValidUser(t)
+
+		changed, err := target.SyncProfile(target.Email(), target.Name(), target.Avatar())
+
+		require.NoError(t, err)
+		assert.False(t, changed)
+	})
+}
+
+// TestRegisterSemAvatar: usuário sem foto é estado legítimo, não erro.
+func TestRegisterSemAvatar(t *testing.T) {
+	t.Parallel()
+
+	registered, err := identity.Register(
+		mustEmail(t, "luigi@example.com"),
+		"Luigi",
+		identity.AvatarURL{},
+		mustExternalIdentity(t, "google-sub-123"),
+	)
+
+	require.NoError(t, err)
+	assert.True(t, registered.Avatar().IsZero())
+	assert.Empty(t, registered.Avatar().String())
 }
 
 // TestSnapshotRoundTrip é a propriedade central do Memento.
@@ -188,6 +255,8 @@ func TestFromSnapshotRecusaEstadoCorrompido(t *testing.T) {
 		{name: "provedor desconhecido", corrupt: func(s *identity.UserSnapshot) { s.ExternalProvider = "facebook" }, wantErr: identity.ErrInvalidExternalIdentity},
 		{name: "subject ausente", corrupt: func(s *identity.UserSnapshot) { s.ExternalSubject = "" }, wantErr: identity.ErrInvalidExternalIdentity},
 		{name: "instante de registro zerado", corrupt: func(s *identity.UserSnapshot) { s.RegisteredAt = time.Time{} }, wantErr: identity.ErrInvalidRegisteredAt},
+		{name: "avatar com esquema perigoso", corrupt: func(s *identity.UserSnapshot) { s.AvatarURL = "javascript:alert(1)" }, wantErr: identity.ErrInvalidAvatarURL},
+		{name: "avatar relativo", corrupt: func(s *identity.UserSnapshot) { s.AvatarURL = "/fotos/luigi.png" }, wantErr: identity.ErrInvalidAvatarURL},
 	}
 
 	for _, testCase := range cases {

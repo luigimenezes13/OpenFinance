@@ -80,10 +80,13 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (identity.Verifi
 // "verificado".
 func toVerifiedIdentity(payload *idtoken.Payload) identity.VerifiedIdentity {
 	return identity.VerifiedIdentity{
-		Provider:      identity.ProviderGoogle,
-		Subject:       payload.Subject,
-		Email:         stringClaim(payload, "email"),
-		Name:          stringClaim(payload, "name"),
+		Provider: identity.ProviderGoogle,
+		Subject:  payload.Subject,
+		Email:    stringClaim(payload, "email"),
+		Name:     stringClaim(payload, "name"),
+		// `picture` é o claim do Google pra foto de perfil; vem quando o
+		// escopo `profile` foi concedido.
+		AvatarURL:     stringClaim(payload, "picture"),
 		EmailVerified: boolClaim(payload, "email_verified"),
 	}
 }

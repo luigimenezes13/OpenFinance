@@ -18,11 +18,19 @@ import (
 func mustUser(t *testing.T, email string, subject string) *identity.User {
 	t.Helper()
 
+	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/foto.jpg")
+	require.NoError(t, err)
+	return mustUserWithAvatar(t, email, subject, avatar)
+}
+
+func mustUserWithAvatar(t *testing.T, email string, subject string, avatar identity.AvatarURL) *identity.User {
+	t.Helper()
+
 	domainEmail, err := identity.NewEmail(email)
 	require.NoError(t, err)
 	external, err := identity.NewExternalIdentity(identity.ProviderGoogle, subject)
 	require.NoError(t, err)
-	registered, err := identity.Register(domainEmail, "Luigi", external)
+	registered, err := identity.Register(domainEmail, "Luigi", avatar, external)
 	require.NoError(t, err)
 	return registered
 }
@@ -46,6 +54,7 @@ func TestIntegrationUserRepositoryRoundTrip(t *testing.T) {
 	assert.Equal(t, originalSnapshot.ID, foundSnapshot.ID)
 	assert.Equal(t, "luigi@example.com", foundSnapshot.Email)
 	assert.Equal(t, "Luigi", foundSnapshot.Name)
+	assert.Equal(t, "https://lh3.googleusercontent.com/a/foto.jpg", foundSnapshot.AvatarURL)
 	assert.Equal(t, identity.ProviderGoogle, foundSnapshot.ExternalProvider)
 	assert.Equal(t, "google-sub-123", foundSnapshot.ExternalSubject)
 	assert.WithinDuration(t, originalSnapshot.RegisteredAt, foundSnapshot.RegisteredAt, time.Millisecond)
@@ -92,7 +101,7 @@ func TestIntegrationUserRepositorySyncProfile(t *testing.T) {
 
 	newEmail, err := identity.NewEmail("novo@example.com")
 	require.NoError(t, err)
-	changed, err := target.SyncProfile(newEmail, "Luigi Menezes")
+	changed, err := target.SyncProfile(newEmail, "Luigi Menezes", target.Avatar())
 	require.NoError(t, err)
 	require.True(t, changed)
 	require.NoError(t, repository.Save(ctx, target))
@@ -176,4 +185,53 @@ VALUES ($1, $2, $3, $4, $5, now(), now(), now())`
 			require.Error(t, err, "o schema tem que recusar este estado")
 		})
 	}
+}
+
+// TestIntegrationUserRepositoryAvatarOpcional cobre as duas pontas da coluna
+// de avatar: usuário sem foto (coluna com default vazio, não NULL) e remoção
+// da foto via upsert.
+func TestIntegrationUserRepositoryAvatarOpcional(t *testing.T) {
+	truncateUsers(t)
+	ctx := context.Background()
+
+	repository := entrepo.NewUserRepository(testClient)
+
+	withoutAvatar := mustUserWithAvatar(t, "semfoto@example.com", "google-sub-sem-foto", identity.AvatarURL{})
+	require.NoError(t, repository.Save(ctx, withoutAvatar))
+
+	found, err := repository.FindByID(ctx, withoutAvatar.ID())
+	require.NoError(t, err)
+	assert.True(t, found.Avatar().IsZero())
+
+	// A coluna guarda string vazia, não NULL: "sem avatar" e "vazio" são a
+	// mesma coisa, e NULL só acrescentaria um terceiro estado sem
+	// significado próprio.
+	var stored *string
+	storedID := withoutAvatar.ID()
+	require.NoError(t, testDB.QueryRowContext(ctx,
+		`SELECT avatar_url FROM users WHERE id = $1`, storedID.UUID()).Scan(&stored))
+	require.NotNil(t, stored)
+	assert.Empty(t, *stored)
+
+	// Ganha uma foto...
+	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/nova.jpg")
+	require.NoError(t, err)
+	changed, err := found.SyncProfile(found.Email(), found.Name(), avatar)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NoError(t, repository.Save(ctx, found))
+
+	reloaded, err := repository.FindByID(ctx, withoutAvatar.ID())
+	require.NoError(t, err)
+	assert.Equal(t, "https://lh3.googleusercontent.com/a/nova.jpg", reloaded.Avatar().String())
+
+	// ...e depois apaga no provedor.
+	changed, err = reloaded.SyncProfile(reloaded.Email(), reloaded.Name(), identity.AvatarURL{})
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NoError(t, repository.Save(ctx, reloaded))
+
+	afterRemoval, err := repository.FindByID(ctx, withoutAvatar.ID())
+	require.NoError(t, err)
+	assert.True(t, afterRemoval.Avatar().IsZero(), "o upsert precisa sobrescrever com vazio")
 }

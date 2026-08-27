@@ -18,6 +18,11 @@ var (
 	// ErrInvalidName indica nome vazio ou só com espaços.
 	ErrInvalidName = errors.New("identity: invalid name")
 
+	// ErrInvalidAvatarURL indica URL de avatar ausente, relativa ou com
+	// esquema não suportado. Note que "usuário sem avatar" NÃO é erro — é o
+	// zero value do VO; este sentinel é pra URL malformada.
+	ErrInvalidAvatarURL = errors.New("identity: invalid avatar url")
+
 	// ErrInvalidExternalIdentity indica provedor desconhecido ou subject
 	// ausente.
 	ErrInvalidExternalIdentity = errors.New("identity: invalid external identity")

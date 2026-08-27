@@ -23,9 +23,14 @@ type ViewProfileInput struct {
 
 // ViewProfileOutput é a projeção serializável do perfil.
 type ViewProfileOutput struct {
-	UserID       string
-	Email        string
-	Name         string
+	UserID string
+	Email  string
+	Name   string
+
+	// AvatarURL vazio = usuário sem avatar. A borda HTTP decide como
+	// representar ausência no JSON (null), que é vocabulário dela.
+	AvatarURL string
+
 	RegisteredAt time.Time
 }
 
@@ -68,11 +73,13 @@ func (u *ViewProfileUseCase) Execute(ctx context.Context, input ViewProfileInput
 func toViewProfileOutput(user *identity.User) ViewProfileOutput {
 	userID := user.ID()
 	email := user.Email()
+	avatar := user.Avatar()
 
 	return ViewProfileOutput{
 		UserID:       userID.String(),
 		Email:        email.String(),
 		Name:         user.Name(),
+		AvatarURL:    avatar.String(),
 		RegisteredAt: user.RegisteredAt(),
 	}
 }

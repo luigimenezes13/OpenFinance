@@ -27,6 +27,9 @@ func TestVerifyAceitaEmail(t *testing.T) {
 	assert.Equal(t, "luigi@example.com", verified.Email)
 	assert.Equal(t, "luigi", verified.Name)
 	assert.True(t, verified.EmailVerified)
+	// Avatar sintético em domínio reservado pra exemplo (RFC 2606): URL
+	// válida que nunca bate em servidor real de ninguém.
+	assert.Equal(t, "https://example.com/avatars/luigi.png", verified.AvatarURL)
 	assert.Equal(t, identity.ProviderGoogle, verified.Provider)
 }
 

@@ -55,6 +55,7 @@ func (r *UserRepository) Save(ctx context.Context, user *identity.User) error {
 		SetID(snapshot.ID).
 		SetEmail(snapshot.Email).
 		SetName(snapshot.Name).
+		SetAvatarURL(snapshot.AvatarURL).
 		SetExternalProvider(snapshot.ExternalProvider).
 		SetExternalSubject(snapshot.ExternalSubject).
 		SetRegisteredAt(snapshot.RegisteredAt).
@@ -109,6 +110,7 @@ func toUserSnapshot(row *ent.User) identity.UserSnapshot {
 		ID:               row.ID,
 		Email:            row.Email,
 		Name:             row.Name,
+		AvatarURL:        row.AvatarURL,
 		ExternalProvider: row.ExternalProvider,
 		ExternalSubject:  row.ExternalSubject,
 		RegisteredAt:     row.RegisteredAt,

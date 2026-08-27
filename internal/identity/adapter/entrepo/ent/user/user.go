@@ -17,6 +17,8 @@ const (
 	FieldEmail = "email"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
+	// FieldAvatarURL holds the string denoting the avatar_url field in the database.
+	FieldAvatarURL = "avatar_url"
 	// FieldExternalProvider holds the string denoting the external_provider field in the database.
 	FieldExternalProvider = "external_provider"
 	// FieldExternalSubject holds the string denoting the external_subject field in the database.
@@ -36,6 +38,7 @@ var Columns = []string{
 	FieldID,
 	FieldEmail,
 	FieldName,
+	FieldAvatarURL,
 	FieldExternalProvider,
 	FieldExternalSubject,
 	FieldRegisteredAt,
@@ -54,6 +57,8 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// DefaultAvatarURL holds the default value on creation for the "avatar_url" field.
+	DefaultAvatarURL string
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
@@ -78,6 +83,11 @@ func ByEmail(opts ...sql.OrderTermOption) OrderOption {
 // ByName orders the results by the name field.
 func ByName(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldName, opts...).ToFunc()
+}
+
+// ByAvatarURL orders the results by the avatar_url field.
+func ByAvatarURL(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAvatarURL, opts...).ToFunc()
 }
 
 // ByExternalProvider orders the results by the external_provider field.

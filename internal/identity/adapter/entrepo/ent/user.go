@@ -22,6 +22,8 @@ type User struct {
 	Email string `json:"email,omitempty"`
 	// Name holds the value of the "name" field.
 	Name string `json:"name,omitempty"`
+	// AvatarURL holds the value of the "avatar_url" field.
+	AvatarURL string `json:"avatar_url,omitempty"`
 	// ExternalProvider holds the value of the "external_provider" field.
 	ExternalProvider string `json:"external_provider,omitempty"`
 	// ExternalSubject holds the value of the "external_subject" field.
@@ -40,7 +42,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case user.FieldEmail, user.FieldName, user.FieldExternalProvider, user.FieldExternalSubject:
+		case user.FieldEmail, user.FieldName, user.FieldAvatarURL, user.FieldExternalProvider, user.FieldExternalSubject:
 			values[i] = new(sql.NullString)
 		case user.FieldRegisteredAt, user.FieldCreatedAt, user.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -78,6 +80,12 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field name", values[i])
 			} else if value.Valid {
 				_m.Name = value.String
+			}
+		case user.FieldAvatarURL:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field avatar_url", values[i])
+			} else if value.Valid {
+				_m.AvatarURL = value.String
 			}
 		case user.FieldExternalProvider:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -150,6 +158,9 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)
+	builder.WriteString(", ")
+	builder.WriteString("avatar_url=")
+	builder.WriteString(_m.AvatarURL)
 	builder.WriteString(", ")
 	builder.WriteString("external_provider=")
 	builder.WriteString(_m.ExternalProvider)

@@ -30,10 +30,24 @@ func NewProfileHandler(viewProfile *application.ViewProfileUseCase, logger *slog
 
 // profileResponse é o DTO de saída da borda.
 type profileResponse struct {
-	UserID       string    `json:"user_id"`
-	Email        string    `json:"email"`
-	Name         string    `json:"name"`
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Name   string `json:"name"`
+
+	// Ponteiro pra sair como `null` quando não há avatar, em vez de string
+	// vazia: `""` obrigaria o cliente a tratar "sem foto" como um caso
+	// especial de string, e `null` já diz isso na própria forma.
+	AvatarURL *string `json:"avatar_url"`
+
 	RegisteredAt time.Time `json:"registered_at"`
+}
+
+// optionalString devolve nil para string vazia, pra o JSON sair com `null`.
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // Me atende GET /v1/me.
@@ -72,6 +86,7 @@ func (h *ProfileHandler) Me(context *gin.Context) {
 		UserID:       output.UserID,
 		Email:        output.Email,
 		Name:         output.Name,
+		AvatarURL:    optionalString(output.AvatarURL),
 		RegisteredAt: output.RegisteredAt,
 	})
 }

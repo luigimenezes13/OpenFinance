@@ -61,10 +61,14 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (identity.Verifi
 
 	localPart, _, _ := strings.Cut(email, "@")
 	return identity.VerifiedIdentity{
-		Provider:      identity.ProviderGoogle,
-		Subject:       "devauth:" + email,
-		Email:         email,
-		Name:          localPart,
+		Provider: identity.ProviderGoogle,
+		Subject:  "devauth:" + email,
+		Email:    email,
+		Name:     localPart,
+		// Avatar sintético apontando pra um domínio RESERVADO pra exemplo
+		// (RFC 2606): a URL é válida e nunca vai carregar imagem de
+		// terceiro nem bater em servidor real de ninguém.
+		AvatarURL:     "https://example.com/avatars/" + localPart + ".png",
 		EmailVerified: true,
 	}, nil
 }

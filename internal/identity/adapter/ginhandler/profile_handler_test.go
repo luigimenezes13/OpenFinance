@@ -66,7 +66,9 @@ func mustUser(t *testing.T) *identity.User {
 	require.NoError(t, err)
 	external, err := identity.NewExternalIdentity(identity.ProviderGoogle, "google-sub-123")
 	require.NoError(t, err)
-	registered, err := identity.Register(email, "Luigi Menezes", external)
+	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/foto.jpg")
+	require.NoError(t, err)
+	registered, err := identity.Register(email, "Luigi Menezes", avatar, external)
 	require.NoError(t, err)
 	return registered
 }
@@ -126,6 +128,7 @@ func TestMe(t *testing.T) {
 	assert.Equal(t, existing.ID().String(), body["user_id"])
 	assert.Equal(t, "luigi@example.com", body["email"])
 	assert.Equal(t, "Luigi Menezes", body["name"])
+	assert.Equal(t, "https://lh3.googleusercontent.com/a/foto.jpg", body["avatar_url"])
 	assert.NotEmpty(t, body["registered_at"])
 
 	// O subject do provedor não pode aparecer em campo nenhum: um frontend
@@ -180,4 +183,25 @@ func TestMeErroDeInfraNaoVaza(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "infrastructure failure")
+}
+
+// TestMeSemAvatarDevolveNull: `null` diz "sem foto" na própria forma; string
+// vazia obrigaria o cliente a tratar isso como caso especial de string.
+func TestMeSemAvatarDevolveNull(t *testing.T) {
+	email, err := identity.NewEmail("semfoto@example.com")
+	require.NoError(t, err)
+	external, err := identity.NewExternalIdentity(identity.ProviderGoogle, "google-sub-999")
+	require.NoError(t, err)
+	withoutAvatar, err := identity.Register(email, "Sem Foto", identity.AvatarURL{}, external)
+	require.NoError(t, err)
+
+	router := newRouter(newFakeUsers(withoutAvatar))
+	recorder := get(t, router, withoutAvatar.ID().String())
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	require.Contains(t, body, "avatar_url", "o campo existe sempre")
+	assert.Nil(t, body["avatar_url"])
 }
