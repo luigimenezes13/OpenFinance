@@ -49,11 +49,15 @@ func main() {
 		log.Fatalln("ATLAS_DEV_DATABASE_URL vazio — use `make migrate-diff name=...`")
 	}
 
+	// Cada bounded context tem o SEU diretório de migrations, com histórico
+	// próprio: é o que permite evoluir o schema de um sem tocar no do outro,
+	// e o que impede um BC de referenciar tabela do outro sem perceber.
+	//
 	// O diretório é a fonte da verdade do histórico: o Atlas mantém um
 	// atlas.sum com o hash de cada arquivo, então editar migration já
 	// aplicada à mão passa a ser um erro detectável em vez de um drift
 	// silencioso.
-	directory, err := atlas.NewLocalDir("migrations")
+	directory, err := atlas.NewLocalDir("migrations/financialtracking")
 	if err != nil {
 		log.Fatalf("falha abrindo migrations/: %v", err)
 	}

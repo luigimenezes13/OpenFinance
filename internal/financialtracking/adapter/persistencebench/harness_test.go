@@ -39,7 +39,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 )
 
-const migrationsDir = "../../../../migrations"
+const migrationsDir = "../../../../migrations/financialtracking"
 
 var (
 	benchDB     *sql.DB
