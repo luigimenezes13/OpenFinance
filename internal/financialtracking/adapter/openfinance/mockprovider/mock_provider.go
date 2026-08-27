@@ -65,6 +65,25 @@ func (p *Provider) FetchTransactions(_ context.Context, providerAccountID string
 	return transactions, nil
 }
 
+// FetchBalance devolve um saldo sintético COERENTE com as transações que o
+// mock gera: a soma delas.
+//
+// Coerência importa mesmo num mock — um saldo aleatório esconderia bug de
+// sinal no fluxo de importação (se o adapter invertesse entrada e saída, com
+// saldo aleatório ninguém notaria; com saldo somado, o número não fecha).
+func (p *Provider) FetchBalance(_ context.Context, _ string) (openfinance.ProviderBalance, error) {
+	var total int64
+	for index := 0; index < p.count; index++ {
+		total += amounts[index%len(amounts)]
+	}
+
+	return openfinance.ProviderBalance{
+		AmountInCents: total,
+		CurrencyCode:  "BRL",
+		AsOf:          time.Now().UTC(),
+	}, nil
+}
+
 // Dados sintéticos: uma entrada (salário) e várias saídas, pra o extrato
 // importado ter as duas direções.
 var (

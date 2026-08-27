@@ -153,6 +153,7 @@ type fakeProvider struct {
 	name         string
 	transactions []openfinance.ProviderTransaction
 	fetchErr     error
+	balance      *openfinance.ProviderBalance
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -162,6 +163,13 @@ func (f *fakeProvider) FetchTransactions(_ context.Context, _ string, _ time.Tim
 		return nil, f.fetchErr
 	}
 	return f.transactions, nil
+}
+
+func (f *fakeProvider) FetchBalance(_ context.Context, _ string) (openfinance.ProviderBalance, error) {
+	if f.balance != nil {
+		return *f.balance, nil
+	}
+	return openfinance.ProviderBalance{AmountInCents: 0, CurrencyCode: "BRL", AsOf: time.Now()}, nil
 }
 
 // fakePinger permite testar /healthz sem Postgres — inclusive o caminho de

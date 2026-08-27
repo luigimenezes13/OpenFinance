@@ -46,9 +46,32 @@ type ProviderTransaction struct {
 	OccurredAt time.Time
 }
 
+// ProviderBalance é o saldo que o provedor informa para uma conta.
+//
+// O saldo do sistema vem EXCLUSIVAMENTE daqui (decisão de 2026-08-27):
+// lançamento manual não mexe em saldo. A razão é que o banco é a autoridade
+// sobre quanto existe na conta — derivar saldo dos lançamentos que o usuário
+// digitou produziria um número que discorda do extrato bancário, e o usuário
+// confiaria no errado.
+type ProviderBalance struct {
+	// AmountInCents na convenção patrimônio (positivo = a conta soma ao
+	// patrimônio; dívida de cartão é NEGATIVA). É o ADAPTER que normaliza a
+	// fatura positiva da Pluggy na entrada.
+	AmountInCents int64
+
+	// CurrencyCode ISO 4217. O use case compara com a moeda da conta local
+	// antes de construir Money.
+	CurrencyCode string
+
+	// AsOf é o instante a que o saldo se refere, em UTC. Obrigatório: sem
+	// ele não há como recusar um saldo que chegou fora de ordem, e syncs
+	// concorrentes fariam o saldo voltar no tempo.
+	AsOf time.Time
+}
+
 // Provider é a porta de leitura de um provedor Open Finance. Interface
-// PEQUENA de propósito (ISP): o v1 só importa transações de uma conta já
-// conectada. Consent flow, health da conexão e descoberta de contas entram
+// PEQUENA de propósito (ISP): o v1 só importa transações e saldo de uma
+// conta já conectada. Consent flow, health da conexão e descoberta de contas entram
 // como métodos/portas próprias no PR4 — interface "Deus" de provider seria
 // obrigar o mock a implementar o que ninguém chama.
 //
@@ -65,4 +88,12 @@ type Provider interface {
 	// Erros de transporte/credencial chegam traduzidos nos sentinels deste
 	// package — pgx, http.Response e afins não vazam.
 	FetchTransactions(ctx context.Context, providerAccountID string, since time.Time) ([]ProviderTransaction, error)
+
+	// FetchBalance devolve o saldo atual da conta no provedor.
+	//
+	// Método separado do FetchTransactions, e não um campo no retorno dele,
+	// porque são duas perguntas independentes: o saldo é o retrato de agora
+	// e não depende da janela `since` pedida para as transações. Juntá-los
+	// obrigaria a buscar histórico só pra saber o saldo.
+	FetchBalance(ctx context.Context, providerAccountID string) (ProviderBalance, error)
 }

@@ -181,6 +181,13 @@ type fakeProvider struct {
 	transactions []openfinance.ProviderTransaction
 	fetchErr     error
 
+	// Saldo devolvido pelo FetchBalance. Zero value = saldo zerado em BRL
+	// datado de agora (montado no método), pra os testes que não se importam
+	// com saldo não precisarem configurá-lo.
+	balance         *openfinance.ProviderBalance
+	balanceErr      error
+	balanceRequests int
+
 	calledAccountID string
 	calledSince     time.Time
 }
@@ -196,6 +203,18 @@ func (f *fakeProvider) FetchTransactions(_ context.Context, providerAccountID st
 		return nil, f.fetchErr
 	}
 	return f.transactions, nil
+}
+
+func (f *fakeProvider) FetchBalance(_ context.Context, providerAccountID string) (openfinance.ProviderBalance, error) {
+	f.balanceRequests++
+	f.calledAccountID = providerAccountID
+	if f.balanceErr != nil {
+		return openfinance.ProviderBalance{}, f.balanceErr
+	}
+	if f.balance != nil {
+		return *f.balance, nil
+	}
+	return openfinance.ProviderBalance{AmountInCents: 0, CurrencyCode: "BRL", AsOf: time.Now()}, nil
 }
 
 // --- Builders de aggregate ------------------------------------------------

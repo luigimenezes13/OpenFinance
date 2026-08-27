@@ -64,12 +64,13 @@ func TestImportFromProviderUseCase_Execute(t *testing.T) {
 
 	assert.Equal(t, "pluggy-acc-77", provider.calledAccountID, "a referência do provider sai do VO Source da conta")
 	assert.WithinDuration(t, since, provider.calledSince, time.Second)
+	assert.Equal(t, 1, provider.balanceRequests, "o saldo é consultado uma vez por importação")
 
 	require.Len(t, transactions.saved, 2)
 	assert.Equal(t,
-		[]string{transaction.EventTypeImported, transaction.EventTypeImported},
+		[]string{transaction.EventTypeImported, transaction.EventTypeImported, account.EventTypeBalanceUpdated},
 		dispatcher.eventNames(),
-		"cada transação importada emite Imported",
+		"cada transação emite Imported, e o saldo do provedor emite BalanceUpdated no fim",
 	)
 
 	imported := transactions.saved[0]
@@ -102,8 +103,13 @@ func TestImportFromProviderUseCase_Execute_SemNovidade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, output.TransactionIDs)
 	assert.Empty(t, transactions.saved)
-	assert.Empty(t, dispatcher.dispatched)
 	assert.True(t, provider.calledSince.IsZero(), "Since zero = todo o histórico")
+
+	// Sem transação nova, MAS o saldo é atualizado: são duas perguntas
+	// independentes ao provedor, e o saldo pode mudar sem lançamento novo na
+	// janela consultada (uma transação antiga liquidada, por exemplo).
+	assert.Equal(t, []string{account.EventTypeBalanceUpdated}, dispatcher.eventNames())
+	assert.True(t, output.BalanceApplied)
 }
 
 // TestImportFromProviderUseCase_Execute_Recusa cobre as recusas que são
@@ -282,6 +288,169 @@ func TestImportFromProviderUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 			})
 
 			require.ErrorIs(t, err, testCase.wantErr)
+		})
+	}
+}
+
+// TestImportFromProviderUseCase_SaldoVemDoProvedor é o teste da REGRA
+// central: o saldo da conta muda por este caminho e só por ele.
+func TestImportFromProviderUseCase_SaldoVemDoProvedor(t *testing.T) {
+	t.Parallel()
+
+	ownerID := uuid.New()
+	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
+	accountID := connected.ID()
+
+	provider := &fakeProvider{
+		name: "pluggy",
+		balance: &openfinance.ProviderBalance{
+			AmountInCents: 1_234_56,
+			CurrencyCode:  "BRL",
+			AsOf:          time.Now(),
+		},
+	}
+	accounts := newFakeAccounts(connected)
+	dispatcher := &fakeDispatcher{}
+	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, dispatcher)
+
+	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
+		UserID: ownerID, AccountID: accountID.UUID(),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(1_234_56), output.Balance)
+	assert.Equal(t, "BRL", output.Currency)
+	assert.True(t, output.BalanceApplied)
+
+	// O saldo foi para o aggregate E para o repositório.
+	balance := connected.Balance()
+	money := balance.Money()
+	assert.Equal(t, int64(1_234_56), money.Amount())
+	require.Len(t, accounts.saved, 1, "conta com saldo novo é persistida")
+
+	// E o evento que existia só no papel agora dispara de verdade.
+	require.Len(t, dispatcher.dispatched, 1)
+	assert.Equal(t, account.EventTypeBalanceUpdated, dispatcher.dispatched[0].EventName())
+}
+
+// TestImportFromProviderUseCase_SaldoNegativo cobre a convenção patrimônio:
+// dívida de cartão é NEGATIVA, e o adapter normaliza a fatura positiva da
+// Pluggy antes de chegar aqui.
+func TestImportFromProviderUseCase_SaldoNegativo(t *testing.T) {
+	t.Parallel()
+
+	ownerID := uuid.New()
+	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
+	accountID := connected.ID()
+
+	provider := &fakeProvider{
+		name:    "pluggy",
+		balance: &openfinance.ProviderBalance{AmountInCents: -4_500_00, CurrencyCode: "BRL", AsOf: time.Now()},
+	}
+	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), newFakeAccounts(connected), provider, &fakeDispatcher{})
+
+	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
+		UserID: ownerID, AccountID: accountID.UUID(),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(-4_500_00), output.Balance)
+}
+
+// TestImportFromProviderUseCase_SaldoAntigoEhIgnorado: webhooks e syncs
+// chegam fora de ordem. Saldo mais velho que o registrado é recusado pelo
+// aggregate e o use case SEGUE — não é falha, e o output diz que não aplicou.
+func TestImportFromProviderUseCase_SaldoAntigoEhIgnorado(t *testing.T) {
+	t.Parallel()
+
+	ownerID := uuid.New()
+	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
+	accountID := connected.ID()
+
+	// Primeiro, um saldo recente.
+	recent, err := account.NewBalance(mustMoney(t, 500_00, "BRL"), time.Now())
+	require.NoError(t, err)
+	require.NoError(t, connected.UpdateBalance(recent))
+	connected.ClearEvents()
+
+	// Agora o provedor responde com um saldo de ontem.
+	provider := &fakeProvider{
+		name: "pluggy",
+		balance: &openfinance.ProviderBalance{
+			AmountInCents: 1_00,
+			CurrencyCode:  "BRL",
+			AsOf:          time.Now().Add(-24 * time.Hour),
+		},
+	}
+	accounts := newFakeAccounts(connected)
+	dispatcher := &fakeDispatcher{}
+	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, dispatcher)
+
+	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
+		UserID: ownerID, AccountID: accountID.UUID(),
+	})
+
+	require.NoError(t, err, "saldo fora de ordem não é erro")
+	assert.False(t, output.BalanceApplied)
+
+	balance := connected.Balance()
+	money := balance.Money()
+	assert.Equal(t, int64(500_00), money.Amount(), "o saldo mais recente é preservado")
+	assert.Empty(t, accounts.saved, "nada a persistir")
+	assert.Empty(t, dispatcher.dispatched, "nada aconteceu, nenhum evento")
+}
+
+// TestImportFromProviderUseCase_SaldoInvalido cobre as recusas do saldo.
+func TestImportFromProviderUseCase_SaldoInvalido(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		arrange func(provider *fakeProvider)
+		wantErr error
+	}{
+		{
+			name: "moeda divergente",
+			arrange: func(provider *fakeProvider) {
+				provider.balance = &openfinance.ProviderBalance{AmountInCents: 100, CurrencyCode: "USD", AsOf: time.Now()}
+			},
+			wantErr: account.ErrCurrencyMismatch,
+		},
+		{
+			name: "instante ausente",
+			arrange: func(provider *fakeProvider) {
+				provider.balance = &openfinance.ProviderBalance{AmountInCents: 100, CurrencyCode: "BRL"}
+			},
+			wantErr: account.ErrInvalidBalance,
+		},
+		{
+			name: "provider indisponível na consulta de saldo",
+			arrange: func(provider *fakeProvider) {
+				provider.balanceErr = openfinance.ErrProviderUnavailable
+			},
+			wantErr: openfinance.ErrProviderUnavailable,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			ownerID := uuid.New()
+			connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
+			accountID := connected.ID()
+			provider := &fakeProvider{name: "pluggy"}
+			testCase.arrange(provider)
+
+			accounts := newFakeAccounts(connected)
+			useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, &fakeDispatcher{})
+
+			_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
+				UserID: ownerID, AccountID: accountID.UUID(),
+			})
+
+			require.ErrorIs(t, err, testCase.wantErr)
+			assert.Empty(t, accounts.saved)
 		})
 	}
 }
