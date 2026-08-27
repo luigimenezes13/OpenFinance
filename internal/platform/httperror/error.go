@@ -18,6 +18,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/openfinance"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 )
 
 // Body é o corpo de erro devolvido pela API. Code é estável e legível por
@@ -46,8 +47,18 @@ type translation struct {
 // A ordem importa só entre sentinels que se sobrepõem — e nenhum aqui se
 // sobrepõe, porque cada um é uma variável única.
 var translations = []translation{
-	// 403 — ownership. Vem antes por clareza: é a regra de autorização.
+	// 401 — quem chama não provou quem é. As duas variantes existem porque
+	// a ação do cliente é diferente: token inválido não tem o que fazer
+	// além de logar de novo; token expirado é só renovar. Nenhuma das duas
+	// detalha o motivo além disso — dizer "assinatura inválida" vs
+	// "audience errada" ajudaria quem está tentando forjar token.
+	{identity.ErrInvalidToken, http.StatusUnauthorized, "invalid_token"},
+	{identity.ErrTokenExpired, http.StatusUnauthorized, "token_expired"},
+
+	// 403 — ownership e autenticado-mas-não-autorizado. Vem antes por
+	// clareza: é a regra de autorização.
 	{shared.ErrForbidden, http.StatusForbidden, "forbidden"},
+	{identity.ErrEmailNotVerified, http.StatusForbidden, "email_not_verified"},
 
 	// 404 — aggregate inexistente.
 	{account.ErrNotFound, http.StatusNotFound, "account_not_found"},
@@ -96,6 +107,16 @@ var translations = []translation{
 
 	{openfinance.ErrAccountNotConnected, http.StatusUnprocessableEntity, "account_not_connected"},
 	{openfinance.ErrProviderMismatch, http.StatusUnprocessableEntity, "provider_mismatch"},
+
+	// Identity: dado incoerente vindo do provedor de identidade. 422 e não
+	// 401, porque o token era válido — o que não presta é o perfil que veio
+	// dentro dele.
+	{identity.ErrNotFound, http.StatusNotFound, "user_not_found"},
+	{identity.ErrInvalidID, http.StatusUnprocessableEntity, "invalid_user_id"},
+	{identity.ErrInvalidEmail, http.StatusUnprocessableEntity, "invalid_email"},
+	{identity.ErrInvalidName, http.StatusUnprocessableEntity, "invalid_name"},
+	{identity.ErrInvalidExternalIdentity, http.StatusUnprocessableEntity, "invalid_external_identity"},
+	{identity.ErrInvalidRegisteredAt, http.StatusUnprocessableEntity, "invalid_registered_at"},
 }
 
 // Translate devolve o status e o corpo de erro para um erro de domínio.
