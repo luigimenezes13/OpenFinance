@@ -16,7 +16,14 @@ import (
 // de banco é como um serviço de produção acaba conectado na máquina de
 // alguém.
 type Config struct {
-	DatabaseURL     string
+	DatabaseURL string
+
+	// GoogleClientID é a audience esperada nos ID tokens. Obrigatória, e por
+	// um motivo de segurança: sem audience, o serviço aceitaria token
+	// legítimo do Google emitido pra OUTRO aplicativo. Falhar no boot é
+	// melhor que subir aceitando qualquer token.
+	GoogleClientID string
+
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
 }
@@ -33,8 +40,14 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: DATABASE_URL é obrigatória")
 	}
 
+	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
+	if googleClientID == "" {
+		return Config{}, fmt.Errorf("config: GOOGLE_CLIENT_ID é obrigatória")
+	}
+
 	return Config{
 		DatabaseURL:     databaseURL,
+		GoogleClientID:  googleClientID,
 		HTTPAddr:        valueOr(os.Getenv("HTTP_ADDR"), defaultHTTPAddr),
 		ShutdownTimeout: defaultShutdownTimeout,
 	}, nil
