@@ -3,8 +3,10 @@ package ginhandler
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/application"
 )
@@ -12,12 +14,24 @@ import (
 // AccountHandler expõe as operações de conta.
 type AccountHandler struct {
 	createAccount *application.CreateAccountUseCase
+	listAccounts  *application.ListAccountsUseCase
+	viewAccount   *application.ViewAccountUseCase
 	logger        *slog.Logger
 }
 
 // NewAccountHandler injeta as dependências por construtor.
-func NewAccountHandler(createAccount *application.CreateAccountUseCase, logger *slog.Logger) *AccountHandler {
-	return &AccountHandler{createAccount: createAccount, logger: logger}
+func NewAccountHandler(
+	createAccount *application.CreateAccountUseCase,
+	listAccounts *application.ListAccountsUseCase,
+	viewAccount *application.ViewAccountUseCase,
+	logger *slog.Logger,
+) *AccountHandler {
+	return &AccountHandler{
+		createAccount: createAccount,
+		listAccounts:  listAccounts,
+		viewAccount:   viewAccount,
+		logger:        logger,
+	}
 }
 
 // createAccountRequest é o corpo aceito. DTO LOCAL do handler: as tags de
@@ -84,4 +98,90 @@ func toAccountResponse(output application.CreateAccountOutput) accountResponse {
 		Balance:  output.Balance,
 		Currency: output.Currency,
 	}
+}
+
+// List atende GET /v1/accounts.
+func (h *AccountHandler) List(context *gin.Context) {
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	output, err := h.listAccounts.Execute(context.Request.Context(), application.ListAccountsInput{
+		UserID: userID,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	summaries := make([]accountSummaryResponse, 0, len(output.Accounts))
+	for _, current := range output.Accounts {
+		summaries = append(summaries, toAccountSummaryResponse(current))
+	}
+
+	// Envelope com `accounts` em vez de array na raiz: array na raiz não tem
+	// para onde crescer, e a primeira necessidade de metadado (total,
+	// paginação) viraria breaking change.
+	context.JSON(http.StatusOK, gin.H{"accounts": summaries})
+}
+
+// Get atende GET /v1/accounts/:id.
+func (h *AccountHandler) Get(context *gin.Context) {
+	accountID, err := uuid.Parse(context.Param("id"))
+	if err != nil {
+		respondBadRequest(context, "id da conta não é um uuid válido")
+		return
+	}
+
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	summary, err := h.viewAccount.Execute(context.Request.Context(), application.ViewAccountInput{
+		UserID:    userID,
+		AccountID: accountID,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	context.JSON(http.StatusOK, toAccountSummaryResponse(summary))
+}
+
+// accountSummaryResponse é o DTO de leitura de conta.
+type accountSummaryResponse struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Kind        string    `json:"kind"`
+	Balance     int64     `json:"balance"`
+	Currency    string    `json:"currency"`
+	BalanceAsOf time.Time `json:"balance_as_of"`
+
+	// null = conta manual. O cliente usa isso pra saber se o saldo é
+	// confiável (veio do banco) ou se a conta é só registro manual.
+	Provider *string `json:"provider"`
+}
+
+// toAccountSummaryResponse traduz a projeção do use case.
+func toAccountSummaryResponse(summary application.AccountSummary) accountSummaryResponse {
+	return accountSummaryResponse{
+		ID:          summary.ID,
+		Name:        summary.Name,
+		Kind:        summary.Kind,
+		Balance:     summary.Balance,
+		Currency:    summary.Currency,
+		BalanceAsOf: summary.BalanceAsOf,
+		Provider:    optionalString(summary.Provider),
+	}
+}
+
+// optionalString devolve nil para string vazia, pra o JSON sair com `null`.
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }

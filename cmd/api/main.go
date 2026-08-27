@@ -112,7 +112,12 @@ func run(logger *slog.Logger) error {
 	viewProfile := identityapplication.NewViewProfileUseCase(users)
 
 	createAccount := application.NewCreateAccountUseCase(accounts)
+	listAccounts := application.NewListAccountsUseCase(accounts)
+	viewAccount := application.NewViewAccountUseCase(accounts)
 	createCategory := application.NewCreateCategoryUseCase(categories)
+	listCategories := application.NewListCategoriesUseCase(categories)
+	listTransactions := application.NewListTransactionsUseCase(transactions)
+	viewTransaction := application.NewViewTransactionUseCase(transactions)
 	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts)
 	categorizeTransaction := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
 	importFromProvider := application.NewImportFromProviderUseCase(transactions, accounts, provider, dispatcher)
@@ -131,9 +136,12 @@ func run(logger *slog.Logger) error {
 		router,
 		database,
 		authenticate,
-		ginhandler.NewAccountHandler(createAccount, logger),
-		ginhandler.NewTransactionHandler(recordTransaction, categorizeTransaction, importFromProvider, logger),
-		ginhandler.NewCategoryHandler(createCategory, logger),
+		ginhandler.NewAccountHandler(createAccount, listAccounts, viewAccount, logger),
+		ginhandler.NewTransactionHandler(
+			recordTransaction, categorizeTransaction, importFromProvider,
+			listTransactions, viewTransaction, logger,
+		),
+		ginhandler.NewCategoryHandler(createCategory, listCategories, logger),
 	)
 
 	// Cada bounded context registra as SUAS rotas com o mesmo middleware.

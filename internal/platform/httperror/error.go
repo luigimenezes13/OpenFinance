@@ -19,6 +19,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // Body é o corpo de erro devolvido pela API. Code é estável e legível por
@@ -97,6 +98,7 @@ var translations = []translation{
 	{transaction.ErrInvalidRef, http.StatusUnprocessableEntity, "invalid_external_ref"},
 	{transaction.ErrInvalidAssignment, http.StatusUnprocessableEntity, "invalid_category_assignment"},
 	{transaction.ErrNotReconcilable, http.StatusUnprocessableEntity, "not_reconcilable"},
+	{transaction.ErrInvalidPeriod, http.StatusUnprocessableEntity, "invalid_period"},
 
 	{category.ErrInvalidID, http.StatusUnprocessableEntity, "invalid_category_id"},
 	{category.ErrInvalidRuleID, http.StatusUnprocessableEntity, "invalid_category_rule_id"},
@@ -104,6 +106,10 @@ var translations = []translation{
 	{category.ErrInvalidParent, http.StatusUnprocessableEntity, "invalid_category_parent"},
 	{category.ErrInvalidRule, http.StatusUnprocessableEntity, "invalid_category_rule"},
 	{category.ErrInvalidKeyword, http.StatusUnprocessableEntity, "invalid_category_keyword"},
+
+	// Paginação: vem do shared kernel, então serve a qualquer listagem de
+	// qualquer bounded context.
+	{kernel.ErrInvalidPage, http.StatusUnprocessableEntity, "invalid_page"},
 
 	{openfinance.ErrAccountNotConnected, http.StatusUnprocessableEntity, "account_not_connected"},
 	{openfinance.ErrProviderMismatch, http.StatusUnprocessableEntity, "provider_mismatch"},

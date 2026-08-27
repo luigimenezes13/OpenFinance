@@ -35,8 +35,10 @@ func newBenchmarkUserID(raw uuid.UUID) (shared.UserID, error) {
 //
 // Rodar com: go test -tags bench -bench BenchmarkFind -benchmem -run '^$'
 
-// benchmarkFind mede a leitura mais quente do sistema.
-func benchmarkFind(b *testing.B, repository account.Repository, accountID account.AccountID) {
+// benchmarkFind mede a leitura mais quente do sistema. Recebe a interface
+// mínima (accountStore), não a porta completa: o benchmark mede FindByID e
+// não tem por que exigir os métodos de listagem.
+func benchmarkFind(b *testing.B, repository accountStore, accountID account.AccountID) {
 	ctx := context.Background()
 
 	b.ReportAllocs()

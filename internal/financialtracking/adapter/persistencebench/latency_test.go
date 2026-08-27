@@ -33,15 +33,36 @@ const (
 	rulesPerCategory = 5
 )
 
-// implementation é uma camada de persistência sob teste. As três satisfazem
-// as MESMAS portas do domínio — é isso que permite medi-las com um harness
-// único, e é a mesma propriedade que permitiu trocar pgx por Ent sem tocar
-// use case.
+// As interfaces abaixo são do TAMANHO do que o benchmark usa (ISP): ele mede
+// Save e FindByID, então não exige das implementações de referência os
+// métodos de listagem das portas completas — escrever SQL de listagem duas
+// vezes só pra satisfazer um contrato que o benchmark não exercita seria
+// código de medição virando código de produção paralelo.
+//
+// As três implementações reais continuam satisfazendo as portas completas do
+// domínio; quem garante isso são as asserções `var _ account.Repository` nos
+// adapters, não este arquivo.
+type accountStore interface {
+	Save(ctx context.Context, target *account.Account) error
+	FindByID(ctx context.Context, id account.AccountID) (*account.Account, error)
+}
+
+type transactionStore interface {
+	Save(ctx context.Context, target *transaction.Transaction) error
+	FindByID(ctx context.Context, id transaction.TransactionID) (*transaction.Transaction, error)
+}
+
+type categoryStore interface {
+	Save(ctx context.Context, target *category.Category) error
+	FindByID(ctx context.Context, id category.CategoryID) (*category.Category, error)
+}
+
+// implementation é uma camada de persistência sob teste.
 type implementation struct {
 	name         string
-	accounts     account.Repository
-	transactions transaction.Repository
-	categories   category.Repository
+	accounts     accountStore
+	transactions transactionStore
+	categories   categoryStore
 }
 
 // fixtures são os aggregates já persistidos, usados pelos workloads de

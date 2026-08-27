@@ -97,3 +97,48 @@ func toTransactionSnapshot(row *ent.Transaction) domaintransaction.TransactionSn
 
 	return snapshot
 }
+
+// List traduz o Criteria do domínio em predicados do Ent.
+//
+// A ordenação é occurred_at DESC + id DESC: extrato se lê do recente pro
+// antigo, e o id como desempate é o que impede duas transações do MESMO
+// instante de trocarem de lugar entre páginas — sem ele, a paginação por
+// offset repetiria ou perderia registros no limite das páginas.
+func (r *TransactionRepository) List(ctx context.Context, criteria domaintransaction.Criteria) ([]*domaintransaction.Transaction, error) {
+	userID := criteria.UserID()
+	query := r.client.Transaction.Query().Where(enttransaction.UserIDEQ(userID.UUID()))
+
+	if accountID, ok := criteria.AccountID(); ok {
+		query = query.Where(enttransaction.AccountIDEQ(accountID.UUID()))
+	}
+	if categoryID, ok := criteria.CategoryID(); ok {
+		query = query.Where(enttransaction.CategoryIDEQ(categoryID.UUID()))
+	}
+	if from, ok := criteria.From(); ok {
+		query = query.Where(enttransaction.OccurredAtGTE(from))
+	}
+	if to, ok := criteria.To(); ok {
+		query = query.Where(enttransaction.OccurredAtLTE(to))
+	}
+
+	page := criteria.Page()
+	rows, err := query.
+		Order(ent.Desc(enttransaction.FieldOccurredAt), ent.Desc(enttransaction.FieldID)).
+		Offset(page.Offset()).
+		Limit(page.Limit()).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("entrepo: falha listando transações: %w", err)
+	}
+
+	transactions := make([]*domaintransaction.Transaction, 0, len(rows))
+	for _, row := range rows {
+		rebuilt, err := domaintransaction.FromSnapshot(toTransactionSnapshot(row))
+		if err != nil {
+			return nil, err
+		}
+		transactions = append(transactions, rebuilt)
+	}
+
+	return transactions, nil
+}

@@ -7,6 +7,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/account"
 	domainaccount "github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
+	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 )
 
 // AccountRepository implementa account.Repository.
@@ -82,4 +83,33 @@ func toAccountSnapshot(row *ent.Account) domainaccount.AccountSnapshot {
 		SourceProvider:          row.SourceProvider,
 		SourceProviderAccountID: row.SourceProviderAccountID,
 	}
+}
+
+// ListByUser devolve as contas do usuário, ordenadas por nome.
+//
+// A ordenação é por NOME e não por created_at: a lista existe pra pessoa
+// achar a conta dela, e "Nubank" antes de "Santander" é previsível — ordem
+// de criação obrigaria a caçar visualmente.
+func (r *AccountRepository) ListByUser(ctx context.Context, userID shared.UserID) ([]*domainaccount.Account, error) {
+	rows, err := r.client.Account.Query().
+		Where(account.UserIDEQ(userID.UUID())).
+		Order(ent.Asc(account.FieldName)).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("entrepo: falha listando contas: %w", err)
+	}
+
+	accounts := make([]*domainaccount.Account, 0, len(rows))
+	for _, row := range rows {
+		// Cada linha volta pelo MESMO FromSnapshot da leitura unitária: uma
+		// segunda montagem "mais rápida" para listagem seria um segundo
+		// caminho com critérios próprios, que é como as duas divergem.
+		rebuilt, err := domainaccount.FromSnapshot(toAccountSnapshot(row))
+		if err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, rebuilt)
+	}
+
+	return accounts, nil
 }

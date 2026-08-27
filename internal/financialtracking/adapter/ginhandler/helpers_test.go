@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -82,9 +83,26 @@ func (f *fakeAccounts) FindByID(_ context.Context, id account.AccountID) (*accou
 	return found, nil
 }
 
+func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*account.Account, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+
+	found := make([]*account.Account, 0, len(f.stored))
+	for _, existing := range f.stored {
+		owner := existing.UserID()
+		if owner.Equals(userID) {
+			found = append(found, existing)
+		}
+	}
+	sort.Slice(found, func(first, second int) bool { return found[first].Name() < found[second].Name() })
+	return found, nil
+}
+
 type fakeTransactions struct {
 	stored  map[string]*transaction.Transaction
 	saveErr error
+	listErr error
 }
 
 func newFakeTransactions(stored ...*transaction.Transaction) *fakeTransactions {
@@ -109,6 +127,43 @@ func (f *fakeTransactions) FindByID(_ context.Context, id transaction.Transactio
 		return nil, transaction.ErrNotFound
 	}
 	return found, nil
+}
+
+func (f *fakeTransactions) List(_ context.Context, criteria transaction.Criteria) ([]*transaction.Transaction, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+
+	found := make([]*transaction.Transaction, 0, len(f.stored))
+	for _, existing := range f.stored {
+		owner := existing.UserID()
+		if !owner.Equals(criteria.UserID()) {
+			continue
+		}
+		if accountID, ok := criteria.AccountID(); ok && !existing.AccountID().Equals(accountID) {
+			continue
+		}
+		if from, ok := criteria.From(); ok && existing.OccurredAt().Before(from) {
+			continue
+		}
+		if to, ok := criteria.To(); ok && existing.OccurredAt().After(to) {
+			continue
+		}
+		found = append(found, existing)
+	}
+	sort.Slice(found, func(first, second int) bool {
+		return found[first].OccurredAt().After(found[second].OccurredAt())
+	})
+
+	page := criteria.Page()
+	if page.Offset() >= len(found) {
+		return []*transaction.Transaction{}, nil
+	}
+	end := page.Offset() + page.Limit()
+	if end > len(found) {
+		end = len(found)
+	}
+	return found[page.Offset():end], nil
 }
 
 type fakeCategories struct {
@@ -137,6 +192,18 @@ func (f *fakeCategories) FindByID(_ context.Context, id category.CategoryID) (*c
 	if !ok {
 		return nil, category.ErrNotFound
 	}
+	return found, nil
+}
+
+func (f *fakeCategories) ListByUser(_ context.Context, userID shared.UserID) ([]*category.Category, error) {
+	found := make([]*category.Category, 0, len(f.stored))
+	for _, existing := range f.stored {
+		owner := existing.UserID()
+		if owner.Equals(userID) {
+			found = append(found, existing)
+		}
+	}
+	sort.Slice(found, func(first, second int) bool { return found[first].Name() < found[second].Name() })
 	return found, nil
 }
 
@@ -216,14 +283,25 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		router,
 		server.pinger,
 		stubAuthenticate(),
-		ginhandler.NewAccountHandler(application.NewCreateAccountUseCase(server.accounts), logger),
+		ginhandler.NewAccountHandler(
+			application.NewCreateAccountUseCase(server.accounts),
+			application.NewListAccountsUseCase(server.accounts),
+			application.NewViewAccountUseCase(server.accounts),
+			logger,
+		),
 		ginhandler.NewTransactionHandler(
 			application.NewRecordTransactionUseCase(server.transactions, server.accounts),
 			application.NewCategorizeTransactionUseCase(server.transactions, server.categories, server.dispatcher),
 			application.NewImportFromProviderUseCase(server.transactions, server.accounts, server.provider, server.dispatcher),
+			application.NewListTransactionsUseCase(server.transactions),
+			application.NewViewTransactionUseCase(server.transactions),
 			logger,
 		),
-		ginhandler.NewCategoryHandler(application.NewCreateCategoryUseCase(server.categories), logger),
+		ginhandler.NewCategoryHandler(
+			application.NewCreateCategoryUseCase(server.categories),
+			application.NewListCategoriesUseCase(server.categories),
+			logger,
+		),
 	)
 	server.router = router
 
@@ -345,6 +423,17 @@ func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string) *
 	source, err := account.NewOpenFinanceSource(providerName, "provider-acc-1")
 	require.NoError(t, err)
 	created, err := account.New(mustUserID(t, ownerID), "Conta Conectada", account.KindChecking, mustCurrency(t, "BRL"), source)
+	require.NoError(t, err)
+	return created
+}
+
+// newTransactionAt cria lançamento com instante controlado, pra os testes de
+// ordem e período não dependerem do relógio.
+func newTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.AccountID, amount int64, occurredAt time.Time) *transaction.Transaction {
+	t.Helper()
+	money, err := shared.NewMoney(amount, mustCurrency(t, "BRL"))
+	require.NoError(t, err)
+	created, err := transaction.NewManual(mustUserID(t, ownerID), accountID, money, occurredAt, "Mercado")
 	require.NoError(t, err)
 	return created
 }

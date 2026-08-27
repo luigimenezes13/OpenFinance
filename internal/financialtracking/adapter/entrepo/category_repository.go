@@ -8,6 +8,7 @@ import (
 	entcategory "github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/category"
 	entcategoryrule "github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/categoryrule"
 	domaincategory "github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
+	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 )
 
 // CategoryRepository implementa category.Repository. É o único repositório
@@ -129,4 +130,35 @@ func toCategorySnapshot(row *ent.Category) domaincategory.CategorySnapshot {
 	}
 
 	return snapshot
+}
+
+// ListByUser devolve as categorias do usuário com suas regras, ordenadas por
+// nome.
+//
+// O WithRules aqui resolve o problema N+1 que a versão ingênua teria: sem
+// ele, listar 20 categorias faria 21 consultas (uma da lista, uma de regras
+// por categoria). O Ent busca as regras de todas as categorias numa segunda
+// query só — é o mesmo `include` do Prisma, e é onde o edge se paga.
+func (r *CategoryRepository) ListByUser(ctx context.Context, userID shared.UserID) ([]*domaincategory.Category, error) {
+	rows, err := r.client.Category.Query().
+		Where(entcategory.UserIDEQ(userID.UUID())).
+		WithRules(func(query *ent.CategoryRuleQuery) {
+			query.Order(ent.Asc(entcategoryrule.FieldKeyword))
+		}).
+		Order(ent.Asc(entcategory.FieldName)).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("entrepo: falha listando categorias: %w", err)
+	}
+
+	categories := make([]*domaincategory.Category, 0, len(rows))
+	for _, row := range rows {
+		rebuilt, err := domaincategory.FromSnapshot(toCategorySnapshot(row))
+		if err != nil {
+			return nil, err
+		}
+		categories = append(categories, rebuilt)
+	}
+
+	return categories, nil
 }

@@ -108,8 +108,6 @@ func categoryRulesInsertSQL(ruleCount int) string {
 
 type sqlAccountRepository struct{ database *sql.DB }
 
-var _ account.Repository = (*sqlAccountRepository)(nil)
-
 func (r *sqlAccountRepository) Save(ctx context.Context, target *account.Account) error {
 	snapshot := target.Snapshot()
 	_, err := r.database.ExecContext(ctx, accountUpsertSQL,
@@ -138,8 +136,6 @@ func (r *sqlAccountRepository) FindByID(ctx context.Context, id account.AccountI
 }
 
 type sqlTransactionRepository struct{ database *sql.DB }
-
-var _ transaction.Repository = (*sqlTransactionRepository)(nil)
 
 func (r *sqlTransactionRepository) Save(ctx context.Context, target *transaction.Transaction) error {
 	snapshot := target.Snapshot()
@@ -185,8 +181,6 @@ func (r *sqlTransactionRepository) FindByID(ctx context.Context, id transaction.
 }
 
 type sqlCategoryRepository struct{ database *sql.DB }
-
-var _ category.Repository = (*sqlCategoryRepository)(nil)
 
 func (r *sqlCategoryRepository) Save(ctx context.Context, target *category.Category) error {
 	snapshot := target.Snapshot()

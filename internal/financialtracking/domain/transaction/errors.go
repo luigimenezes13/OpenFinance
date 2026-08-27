@@ -13,4 +13,5 @@ var (
 	ErrInvalidRef         = errors.New("transaction: invalid external ref")
 	ErrInvalidAssignment  = errors.New("transaction: invalid category assignment")
 	ErrNotReconcilable    = errors.New("transaction: manual transaction cannot be reconciled")
+	ErrInvalidPeriod      = errors.New("transaction: invalid period")
 )
