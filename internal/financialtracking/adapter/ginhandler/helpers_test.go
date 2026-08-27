@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -31,7 +32,9 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/openfinance"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
+	"github.com/luigimenezes13/financial-manager/internal/platform/httperror"
 )
 
 // errInfra simula falha de infraestrutura, pra exercitar o 500.
@@ -204,6 +207,7 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 	ginhandler.RegisterRoutes(
 		router,
 		server.pinger,
+		stubAuthenticate(),
 		ginhandler.NewAccountHandler(application.NewCreateAccountUseCase(server.accounts), logger),
 		ginhandler.NewTransactionHandler(
 			application.NewRecordTransactionUseCase(server.transactions, server.accounts),
@@ -216,6 +220,41 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 	server.router = router
 
 	return server
+}
+
+// stubAuthenticate substitui o middleware do BC Identity por um que lê o
+// usuário direto do header X-User-Id.
+//
+// Por que stub e não o middleware real: estes testes são do Financial
+// Tracking, e o que eles precisam saber sobre autenticação é apenas
+// "resolvido ou não". Usar o middleware real obrigaria cada teste daqui a
+// forjar um token do Google — acoplando os testes de conta e transação ao
+// mecanismo de credencial, que é assunto de outro bounded context e tem
+// testes próprios (identity/adapter/ginmiddleware).
+//
+// O contrato que este stub imita é o mesmo do real: injeta um uuid no
+// context da request, ou responde 401.
+func stubAuthenticate() gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		raw := ginContext.GetHeader("X-User-Id")
+		if raw == "" {
+			ginContext.AbortWithStatusJSON(http.StatusUnauthorized, httperror.Body{
+				Error: httperror.Detail{Code: "invalid_token", Message: "credencial ausente"},
+			})
+			return
+		}
+		userID, err := uuid.Parse(raw)
+		if err != nil {
+			ginContext.AbortWithStatusJSON(http.StatusUnauthorized, httperror.Body{
+				Error: httperror.Detail{Code: "invalid_token", Message: "credencial mal formada"},
+			})
+			return
+		}
+
+		ginContext.Request = ginContext.Request.WithContext(
+			ginmiddleware.ContextWithUserID(ginContext.Request.Context(), userID))
+		ginContext.Next()
+	}
 }
 
 // request dispara uma requisição contra o router em memória (sem socket) e
