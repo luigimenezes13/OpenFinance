@@ -1,8 +1,11 @@
 name: CI
 
+# `push` restrito a main, e `pull_request` para o resto: com `push` em todos
+# os branches, cada PR rodava a suíte DUAS vezes (uma pelo push, outra pelo
+# evento do PR) — o dobro de runner para o mesmo commit.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 # Cancela execuções anteriores do mesmo branch: push em sequência não precisa
