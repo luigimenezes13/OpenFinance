@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,12 @@ type Config struct {
 	// legítimo do Google emitido pra OUTRO aplicativo. Falhar no boot é
 	// melhor que subir aceitando qualquer token.
 	GoogleClientID string
+
+	// CORSAllowedOrigins são as origens que o navegador pode usar pra chamar
+	// esta API (ex: "https://app.exemplo.com,http://localhost:3000"). Vazio =
+	// nenhum cabeçalho CORS, que é o default restrito: serviço sem
+	// configuração não deve ficar aberto por omissão.
+	CORSAllowedOrigins []string
 
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
@@ -46,11 +53,30 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		DatabaseURL:     databaseURL,
-		GoogleClientID:  googleClientID,
-		HTTPAddr:        valueOr(os.Getenv("HTTP_ADDR"), defaultHTTPAddr),
-		ShutdownTimeout: defaultShutdownTimeout,
+		DatabaseURL:        databaseURL,
+		GoogleClientID:     googleClientID,
+		CORSAllowedOrigins: splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		HTTPAddr:           valueOr(os.Getenv("HTTP_ADDR"), defaultHTTPAddr),
+		ShutdownTimeout:    defaultShutdownTimeout,
 	}, nil
+}
+
+// splitAndTrim quebra uma lista separada por vírgula, descartando vazios —
+// "a, b," é escrita comum em variável de ambiente.
+func splitAndTrim(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }
 
 // valueOr devolve o fallback quando a variável não foi definida.

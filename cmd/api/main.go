@@ -38,6 +38,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/platform/config"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 	platformevents "github.com/luigimenezes13/financial-manager/internal/platform/events"
+	"github.com/luigimenezes13/financial-manager/internal/platform/httpmiddleware"
 )
 
 func main() {
@@ -114,8 +115,13 @@ func run(logger *slog.Logger) error {
 	createAccount := application.NewCreateAccountUseCase(accounts)
 	listAccounts := application.NewListAccountsUseCase(accounts)
 	viewAccount := application.NewViewAccountUseCase(accounts)
+	renameAccount := application.NewRenameAccountUseCase(accounts)
 	createCategory := application.NewCreateCategoryUseCase(categories)
 	listCategories := application.NewListCategoriesUseCase(categories)
+	renameCategory := application.NewRenameCategoryUseCase(categories)
+	moveCategory := application.NewMoveCategoryUseCase(categories)
+	addCategoryRule := application.NewAddCategoryRuleUseCase(categories)
+	removeCategoryRule := application.NewRemoveCategoryRuleUseCase(categories)
 	listTransactions := application.NewListTransactionsUseCase(transactions)
 	viewTransaction := application.NewViewTransactionUseCase(transactions)
 	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts)
@@ -126,6 +132,11 @@ func run(logger *slog.Logger) error {
 	router := gin.New()
 	// Recovery evita que panic em um handler derrube o processo inteiro.
 	router.Use(gin.Recovery())
+	// CORS vem ANTES da autenticação: o preflight OPTIONS do browser não
+	// carrega credencial, e se ele passasse pelo middleware de identidade
+	// voltaria 401 — que o browser mostra como "CORS negado", escondendo a
+	// causa.
+	router.Use(httpmiddleware.CORS(configuration.CORSAllowedOrigins))
 
 	// O middleware do BC Identity é montado aqui e entregue pronto ao BC
 	// Financial Tracking: as rotas exigem "usuário resolvido", sem saber
@@ -136,12 +147,15 @@ func run(logger *slog.Logger) error {
 		router,
 		database,
 		authenticate,
-		ginhandler.NewAccountHandler(createAccount, listAccounts, viewAccount, logger),
+		ginhandler.NewAccountHandler(createAccount, listAccounts, viewAccount, renameAccount, logger),
 		ginhandler.NewTransactionHandler(
 			recordTransaction, categorizeTransaction, importFromProvider,
 			listTransactions, viewTransaction, logger,
 		),
-		ginhandler.NewCategoryHandler(createCategory, listCategories, logger),
+		ginhandler.NewCategoryHandler(
+			createCategory, listCategories, renameCategory, moveCategory,
+			addCategoryRule, removeCategoryRule, logger,
+		),
 	)
 
 	// Cada bounded context registra as SUAS rotas com o mesmo middleware.

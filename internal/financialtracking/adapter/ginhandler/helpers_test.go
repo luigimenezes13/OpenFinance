@@ -287,6 +287,7 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 			application.NewCreateAccountUseCase(server.accounts),
 			application.NewListAccountsUseCase(server.accounts),
 			application.NewViewAccountUseCase(server.accounts),
+			application.NewRenameAccountUseCase(server.accounts),
 			logger,
 		),
 		ginhandler.NewTransactionHandler(
@@ -300,6 +301,10 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		ginhandler.NewCategoryHandler(
 			application.NewCreateCategoryUseCase(server.categories),
 			application.NewListCategoriesUseCase(server.categories),
+			application.NewRenameCategoryUseCase(server.categories),
+			application.NewMoveCategoryUseCase(server.categories),
+			application.NewAddCategoryRuleUseCase(server.categories),
+			application.NewRemoveCategoryRuleUseCase(server.categories),
 			logger,
 		),
 	)

@@ -16,6 +16,7 @@ type AccountHandler struct {
 	createAccount *application.CreateAccountUseCase
 	listAccounts  *application.ListAccountsUseCase
 	viewAccount   *application.ViewAccountUseCase
+	renameAccount *application.RenameAccountUseCase
 	logger        *slog.Logger
 }
 
@@ -24,12 +25,14 @@ func NewAccountHandler(
 	createAccount *application.CreateAccountUseCase,
 	listAccounts *application.ListAccountsUseCase,
 	viewAccount *application.ViewAccountUseCase,
+	renameAccount *application.RenameAccountUseCase,
 	logger *slog.Logger,
 ) *AccountHandler {
 	return &AccountHandler{
 		createAccount: createAccount,
 		listAccounts:  listAccounts,
 		viewAccount:   viewAccount,
+		renameAccount: renameAccount,
 		logger:        logger,
 	}
 }
@@ -184,4 +187,47 @@ func optionalString(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+// renameAccountRequest é o corpo da renomeação. Só `name`: kind e moeda são
+// decisões de abertura da conta (trocar a moeda reinterpretaria todo o
+// histórico de lançamentos), e saldo vem do provedor.
+type renameAccountRequest struct {
+	Name string `json:"name" binding:"required"`
+}
+
+// Rename atende PATCH /v1/accounts/:id.
+//
+// PATCH e não PUT: o corpo carrega UM campo, não o recurso inteiro. PUT
+// prometeria substituição total, e um cliente que mandasse só `name`
+// esperaria — corretamente — que o resto fosse apagado.
+func (h *AccountHandler) Rename(context *gin.Context) {
+	accountID, err := uuid.Parse(context.Param("id"))
+	if err != nil {
+		respondBadRequest(context, "id da conta não é um uuid válido")
+		return
+	}
+
+	var request renameAccountRequest
+	if err := context.ShouldBindJSON(&request); err != nil {
+		respondBadRequest(context, err.Error())
+		return
+	}
+
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	summary, err := h.renameAccount.Execute(context.Request.Context(), application.RenameAccountInput{
+		UserID:    userID,
+		AccountID: accountID,
+		Name:      request.Name,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	context.JSON(http.StatusOK, toAccountSummaryResponse(summary))
 }
