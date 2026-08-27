@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancela execuções anteriores do mesmo branch: push em sequência não precisa
+# de duas execuções competindo por runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Um lugar só para as credenciais do Postgres de CI, usadas pelo service
+  # container e pelas URLs dos testes.
+  POSTGRES_USER: financial
+  POSTGRES_PASSWORD: financial
+  POSTGRES_DB: financial_manager_test
+
+jobs:
+  check:
+    name: fmt, vet e testes unitários
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Lê a versão do go.mod: uma fonte de verdade só, então bump de Go
+          # não exige editar o workflow.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        # gofmt não tem modo "check", então o teste é a saída estar vazia.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "arquivos não formatados:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet (todas as build tags)
+        # Cada tag compila um conjunto diferente de arquivos. Sem rodar as
+        # quatro, o código atrás de tag fica sem verificação nenhuma.
+        run: |
+          go vet ./...
+          go vet -tags devauth ./...
+          go vet -tags integration ./...
+          go vet -tags bench ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: testes unitários e de borda
+        # -race porque o dispatcher e o pool são compartilhados entre
+        # goroutines: corrida de dados não aparece sem o detector.
+        run: |
+          go test ./... -count=1 -race
+          go test -tags devauth ./... -count=1 -race
+
+  codegen:
+    name: código gerado em sincronia
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: regenerar os clients do Ent
+        run: make generate
+
+      - name: verificar que não houve diff
+        # O código gerado é versionado. Se alguém muda o schema e esquece de
+        # rodar `make generate`, o repositório passa a mentir sobre o próprio
+        # schema — e esse passo é o que denuncia.
+        run: |
+          if ! git diff --exit-code; then
+            echo "código gerado está fora de sincronia: rode 'make generate' e commite"
+            exit 1
+          fi
+
+  integration:
+    name: integração contra Postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: financial
+          POSTGRES_PASSWORD: financial
+          POSTGRES_DB: financial_manager_test
+        ports:
+          - 5432:5432
+        # Sem o health check, os testes começam antes de o Postgres aceitar
+        # conexão e falham por corrida, não por bug.
+        options: >-
+          --health-cmd "pg_isready -U financial"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: testes de integração
+        # Os harnesses aplicam as migrations geradas por conta própria, então
+        # não há passo de migrate aqui: o que o CI valida é o SQL que está
+        # versionado.
+        env:
+          TEST_DATABASE_URL: postgres://financial:financial@localhost:5432/financial_manager_test?sslmode=disable
+        run: go test ./... -count=1 -tags integration -run Integration
+
+  docker:
+    name: imagem do container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build da imagem
+        # Só build, sem push: o objetivo é garantir que o Dockerfile não
+        # quebrou, não publicar.
+        run: docker build -t financial-manager:ci .

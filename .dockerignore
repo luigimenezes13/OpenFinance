@@ -1,0 +1,12 @@
+# Fora do contexto de build: o que não entra no binário só deixa o build mais
+# lento e invalida cache sem motivo.
+.git
+.github
+docs
+migrations
+scripts
+docker-compose.yml
+Dockerfile
+Makefile
+README.md
+*.md
