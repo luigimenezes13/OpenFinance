@@ -15,15 +15,30 @@ FT_ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
 ID_MIGRATE_MAIN := internal/identity/adapter/entrepo/ent/migrate/main.go
 ID_ENT_DIR      := internal/identity/adapter/entrepo/ent
 
-.PHONY: run test test-integration bench-persistence generate migrate-diff migrate-diff-identity migrate-apply db-up db-databases db-down db-reset fmt vet check
+.PHONY: run run-devauth test test-integration bench-persistence generate migrate-diff migrate-diff-identity migrate-apply db-up db-databases db-down db-reset fmt vet check
 
-# Sobe a API localmente contra o Postgres do compose.
+# Sobe a API localmente contra o Postgres do compose. Exige um
+# GOOGLE_CLIENT_ID de verdade e um ID token do Google nas requisições.
 run: db-up
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/api
 
-# Testes unitários: domínio e application. Sem banco, sem rede.
+# Sobe a API com AUTENTICAÇÃO FALSA, pra testar à mão sem frontend: o token
+# passa a ser um e-mail (`Authorization: Bearer voce@example.com`).
+#
+# A tag devauth é o que garante que isso não escapa: o binário de produção
+# não contém o verificador falso, e nenhuma variável de ambiente o ativa.
+# GOOGLE_CLIENT_ID vai preenchido só porque a config o exige; ele é ignorado
+# nesta build.
+run-devauth: db-up
+	DATABASE_URL="$(DATABASE_URL)" GOOGLE_CLIENT_ID="ignorado-no-devauth" \
+		go run -tags devauth ./cmd/api
+
+# Testes unitários: domínio e application. Sem banco, sem rede. Roda também
+# os packages que só existem sob a tag devauth, senão eles nunca seriam
+# compilados nem testados.
 test:
 	go test ./... -count=1
+	go test -tags devauth ./... -count=1
 
 # Testes de integração: repositórios contra Postgres real, com as migrations
 # geradas aplicadas. A build tag `integration` os mantém fora do `make test`.
