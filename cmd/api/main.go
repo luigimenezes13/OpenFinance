@@ -30,8 +30,8 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 	identityentrepo "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
+	identityginhandler "github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginhandler"
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
-	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/googleoidc"
 	identityapplication "github.com/luigimenezes13/financial-manager/internal/identity/application"
 	identitydomain "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
@@ -97,7 +97,10 @@ func run(logger *slog.Logger) error {
 	dispatcher := platformevents.NewInProcessDispatcher(logger)
 
 	users := identityentrepo.NewUserRepository(identityClient)
-	verifier, err := googleoidc.NewVerifier(configuration.GoogleClientID)
+	// Qual verificador entra é decidido em tempo de COMPILAÇÃO (ver
+	// verifier_google.go e verifier_devauth.go): o binário de produção não
+	// contém o de desenvolvimento.
+	verifier, err := newTokenVerifier(configuration, logger)
 	if err != nil {
 		return err
 	}
@@ -106,6 +109,7 @@ func run(logger *slog.Logger) error {
 
 	// --- Use cases (só conhecem as portas) ---
 	signIn := identityapplication.NewSignInUseCase(users, verifier, dispatcher)
+	viewProfile := identityapplication.NewViewProfileUseCase(users)
 
 	createAccount := application.NewCreateAccountUseCase(accounts)
 	createCategory := application.NewCreateCategoryUseCase(categories)
@@ -130,6 +134,13 @@ func run(logger *slog.Logger) error {
 		ginhandler.NewAccountHandler(createAccount, logger),
 		ginhandler.NewTransactionHandler(recordTransaction, categorizeTransaction, importFromProvider, logger),
 		ginhandler.NewCategoryHandler(createCategory, logger),
+	)
+
+	// Cada bounded context registra as SUAS rotas com o mesmo middleware.
+	identityginhandler.RegisterRoutes(
+		router,
+		authenticate,
+		identityginhandler.NewProfileHandler(viewProfile, logger),
 	)
 
 	return serve(ctx, logger, configuration, router)

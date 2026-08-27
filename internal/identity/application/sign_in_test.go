@@ -47,6 +47,9 @@ func (f *fakeUsers) Save(_ context.Context, user *identity.User) error {
 }
 
 func (f *fakeUsers) FindByID(_ context.Context, id identity.UserID) (*identity.User, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
 	for _, existing := range f.stored {
 		if existing.ID().Equals(id) {
 			return existing, nil
