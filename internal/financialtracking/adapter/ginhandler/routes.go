@@ -33,15 +33,17 @@ func RegisterRoutes(
 	authenticated := router.Group("/v1", authenticate)
 
 	authenticated.POST("/accounts", accounts.Create)
+	authenticated.GET("/accounts", accounts.List)
+	authenticated.GET("/accounts/:id", accounts.Get)
+
 	authenticated.POST("/categories", categories.Create)
+	authenticated.GET("/categories", categories.List)
+
 	authenticated.POST("/transactions", transactions.Record)
+	authenticated.GET("/transactions", transactions.List)
+	authenticated.GET("/transactions/:id", transactions.Get)
 	authenticated.PUT("/transactions/:id/category", transactions.Categorize)
 	authenticated.POST("/transactions/import", transactions.Import)
-
-	// Endpoints de LEITURA (GET) ficaram fora do v1: não existe use case de
-	// consulta, e inventar um handler que fala direto com o repositório
-	// furaria a regra de "toda ação é um use case". Entram junto com os
-	// casos de uso de consulta.
 }
 
 // Pinger é o que a rota de saúde precisa do banco: UMA operação.

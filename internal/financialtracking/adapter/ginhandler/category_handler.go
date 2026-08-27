@@ -13,12 +13,21 @@ import (
 // CategoryHandler expõe as operações de categoria.
 type CategoryHandler struct {
 	createCategory *application.CreateCategoryUseCase
+	listCategories *application.ListCategoriesUseCase
 	logger         *slog.Logger
 }
 
 // NewCategoryHandler injeta as dependências por construtor.
-func NewCategoryHandler(createCategory *application.CreateCategoryUseCase, logger *slog.Logger) *CategoryHandler {
-	return &CategoryHandler{createCategory: createCategory, logger: logger}
+func NewCategoryHandler(
+	createCategory *application.CreateCategoryUseCase,
+	listCategories *application.ListCategoriesUseCase,
+	logger *slog.Logger,
+) *CategoryHandler {
+	return &CategoryHandler{
+		createCategory: createCategory,
+		listCategories: listCategories,
+		logger:         logger,
+	}
 }
 
 // createCategoryRequest é o corpo aceito. parent_id chega como STRING (é
@@ -85,4 +94,50 @@ func toCategoryResponse(output application.CreateCategoryOutput) categoryRespons
 		Name:     output.Name,
 		ParentID: output.ParentID,
 	}
+}
+
+// List atende GET /v1/categories.
+func (h *CategoryHandler) List(context *gin.Context) {
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	output, err := h.listCategories.Execute(context.Request.Context(), application.ListCategoriesInput{
+		UserID: userID,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	summaries := make([]categorySummaryResponse, 0, len(output.Categories))
+	for _, current := range output.Categories {
+		rules := make([]categoryRuleResponse, 0, len(current.Rules))
+		for _, rule := range current.Rules {
+			rules = append(rules, categoryRuleResponse{ID: rule.ID, Keyword: rule.Keyword})
+		}
+		summaries = append(summaries, categorySummaryResponse{
+			ID:       current.ID,
+			Name:     current.Name,
+			ParentID: current.ParentID,
+			Rules:    rules,
+		})
+	}
+
+	context.JSON(http.StatusOK, gin.H{"categories": summaries})
+}
+
+// categorySummaryResponse é o DTO de leitura de categoria, com suas regras.
+type categorySummaryResponse struct {
+	ID       string                 `json:"id"`
+	Name     string                 `json:"name"`
+	ParentID *string                `json:"parent_id"`
+	Rules    []categoryRuleResponse `json:"rules"`
+}
+
+// categoryRuleResponse é o DTO de leitura de uma regra.
+type categoryRuleResponse struct {
+	ID      string `json:"id"`
+	Keyword string `json:"keyword"`
 }

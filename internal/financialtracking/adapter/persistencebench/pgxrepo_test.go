@@ -27,8 +27,6 @@ import (
 
 type pgxAccountRepository struct{ pool *pgxpool.Pool }
 
-var _ account.Repository = (*pgxAccountRepository)(nil)
-
 func (r *pgxAccountRepository) Save(ctx context.Context, target *account.Account) error {
 	snapshot := target.Snapshot()
 	_, err := r.pool.Exec(ctx, accountUpsertSQL,
@@ -57,8 +55,6 @@ func (r *pgxAccountRepository) FindByID(ctx context.Context, id account.AccountI
 }
 
 type pgxTransactionRepository struct{ pool *pgxpool.Pool }
-
-var _ transaction.Repository = (*pgxTransactionRepository)(nil)
 
 func (r *pgxTransactionRepository) Save(ctx context.Context, target *transaction.Transaction) error {
 	snapshot := target.Snapshot()
@@ -104,8 +100,6 @@ func (r *pgxTransactionRepository) FindByID(ctx context.Context, id transaction.
 }
 
 type pgxCategoryRepository struct{ pool *pgxpool.Pool }
-
-var _ category.Repository = (*pgxCategoryRepository)(nil)
 
 func (r *pgxCategoryRepository) Save(ctx context.Context, target *category.Category) error {
 	snapshot := target.Snapshot()

@@ -14,10 +14,12 @@ import (
 // TransactionHandler expõe as operações de transação. Três use cases, três
 // métodos — o handler não decide qual regra roda, só qual caso de uso.
 type TransactionHandler struct {
-	recordTransaction    *application.RecordTransactionUseCase
-	categorizeTransation *application.CategorizeTransactionUseCase
-	importFromProvider   *application.ImportFromProviderUseCase
-	logger               *slog.Logger
+	recordTransaction     *application.RecordTransactionUseCase
+	categorizeTransaction *application.CategorizeTransactionUseCase
+	importFromProvider    *application.ImportFromProviderUseCase
+	listTransactions      *application.ListTransactionsUseCase
+	viewTransaction       *application.ViewTransactionUseCase
+	logger                *slog.Logger
 }
 
 // NewTransactionHandler injeta as dependências por construtor.
@@ -25,13 +27,17 @@ func NewTransactionHandler(
 	recordTransaction *application.RecordTransactionUseCase,
 	categorizeTransaction *application.CategorizeTransactionUseCase,
 	importFromProvider *application.ImportFromProviderUseCase,
+	listTransactions *application.ListTransactionsUseCase,
+	viewTransaction *application.ViewTransactionUseCase,
 	logger *slog.Logger,
 ) *TransactionHandler {
 	return &TransactionHandler{
-		recordTransaction:    recordTransaction,
-		categorizeTransation: categorizeTransaction,
-		importFromProvider:   importFromProvider,
-		logger:               logger,
+		recordTransaction:     recordTransaction,
+		categorizeTransaction: categorizeTransaction,
+		importFromProvider:    importFromProvider,
+		listTransactions:      listTransactions,
+		viewTransaction:       viewTransaction,
+		logger:                logger,
 	}
 }
 
@@ -127,7 +133,7 @@ func (h *TransactionHandler) Categorize(context *gin.Context) {
 		assignedBy = defaultAssignedBy
 	}
 
-	output, err := h.categorizeTransation.Execute(context.Request.Context(), application.CategorizeTransactionInput{
+	output, err := h.categorizeTransaction.Execute(context.Request.Context(), application.CategorizeTransactionInput{
 		UserID:        userID,
 		TransactionID: transactionID,
 		CategoryID:    categoryID,
@@ -265,5 +271,131 @@ func toImportResponse(output application.ImportFromProviderOutput) importRespons
 		Balance:        output.Balance,
 		Currency:       output.Currency,
 		BalanceApplied: output.BalanceApplied,
+	}
+}
+
+// List atende GET /v1/transactions — o extrato.
+//
+// Filtros por query string: account_id, category_id, from, to, limit, offset.
+// Todos opcionais; a validação de cada um mora no VO de domínio
+// correspondente, e este handler só converte texto em tipo.
+func (h *TransactionHandler) List(context *gin.Context) {
+	accountID, ok := optionalUUID(context, "account_id")
+	if !ok {
+		return
+	}
+	categoryID, ok := optionalUUID(context, "category_id")
+	if !ok {
+		return
+	}
+	from, ok := optionalTime(context, "from")
+	if !ok {
+		return
+	}
+	to, ok := optionalTime(context, "to")
+	if !ok {
+		return
+	}
+	limit, ok := optionalInt(context, "limit")
+	if !ok {
+		return
+	}
+	offset, ok := optionalInt(context, "offset")
+	if !ok {
+		return
+	}
+
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	output, err := h.listTransactions.Execute(context.Request.Context(), application.ListTransactionsInput{
+		UserID:     userID,
+		AccountID:  accountID,
+		CategoryID: categoryID,
+		From:       from,
+		To:         to,
+		Limit:      limit,
+		Offset:     offset,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	summaries := make([]transactionSummaryResponse, 0, len(output.Transactions))
+	for _, current := range output.Transactions {
+		summaries = append(summaries, toTransactionSummaryResponse(current))
+	}
+
+	// A janela aplicada volta junto: o cliente que mandou limit vazio precisa
+	// saber qual default entrou pra montar a próxima página.
+	context.JSON(http.StatusOK, gin.H{
+		"transactions": summaries,
+		"limit":        output.Limit,
+		"offset":       output.Offset,
+	})
+}
+
+// Get atende GET /v1/transactions/:id.
+func (h *TransactionHandler) Get(context *gin.Context) {
+	transactionID, err := uuid.Parse(context.Param("id"))
+	if err != nil {
+		respondBadRequest(context, "id da transação não é um uuid válido")
+		return
+	}
+
+	userID, ok := userIDFrom(context)
+	if !ok {
+		return
+	}
+
+	summary, err := h.viewTransaction.Execute(context.Request.Context(), application.ViewTransactionInput{
+		UserID:        userID,
+		TransactionID: transactionID,
+	})
+	if err != nil {
+		respondError(context, h.logger, err)
+		return
+	}
+
+	context.JSON(http.StatusOK, toTransactionSummaryResponse(summary))
+}
+
+// transactionSummaryResponse é o DTO de leitura de transação.
+type transactionSummaryResponse struct {
+	ID          string    `json:"id"`
+	AccountID   string    `json:"account_id"`
+	Amount      int64     `json:"amount"`
+	Currency    string    `json:"currency"`
+	OccurredAt  time.Time `json:"occurred_at"`
+	Description string    `json:"description"`
+	Reconciled  bool      `json:"reconciled"`
+
+	// Bloco de categoria: os três saem null juntos quando a transação não
+	// está categorizada, espelhando o VO que os originou.
+	CategoryID *string    `json:"category_id"`
+	AssignedBy *string    `json:"assigned_by"`
+	AssignedAt *time.Time `json:"assigned_at"`
+
+	// null = lançamento manual.
+	Provider *string `json:"provider"`
+}
+
+// toTransactionSummaryResponse traduz a projeção do use case.
+func toTransactionSummaryResponse(summary application.TransactionSummary) transactionSummaryResponse {
+	return transactionSummaryResponse{
+		ID:          summary.ID,
+		AccountID:   summary.AccountID,
+		Amount:      summary.Amount,
+		Currency:    summary.Currency,
+		OccurredAt:  summary.OccurredAt,
+		Description: summary.Description,
+		Reconciled:  summary.Reconciled,
+		CategoryID:  summary.CategoryID,
+		AssignedBy:  summary.AssignedBy,
+		AssignedAt:  summary.AssignedAt,
+		Provider:    optionalString(summary.Provider),
 	}
 }

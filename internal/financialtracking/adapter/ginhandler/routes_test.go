@@ -60,8 +60,13 @@ func TestTodasAsRotasV1ExigemAutenticacao(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPost, "/v1/accounts"},
+		{http.MethodGet, "/v1/accounts"},
+		{http.MethodGet, "/v1/accounts/" + uuid.New().String()},
 		{http.MethodPost, "/v1/categories"},
+		{http.MethodGet, "/v1/categories"},
 		{http.MethodPost, "/v1/transactions"},
+		{http.MethodGet, "/v1/transactions"},
+		{http.MethodGet, "/v1/transactions/" + uuid.New().String()},
 		{http.MethodPut, "/v1/transactions/" + uuid.New().String() + "/category"},
 		{http.MethodPost, "/v1/transactions/import"},
 	}

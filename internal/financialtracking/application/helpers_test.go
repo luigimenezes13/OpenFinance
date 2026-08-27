@@ -12,6 +12,7 @@ package application_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -71,6 +72,26 @@ func (f *fakeAccounts) FindByID(_ context.Context, id account.AccountID) (*accou
 	return found, nil
 }
 
+// listByUser filtra e ordena em memória, do jeito que o repositório real
+// ordena (nome), pra o teste do use case exercitar a projeção de verdade.
+func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*account.Account, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+
+	found := make([]*account.Account, 0, len(f.stored))
+	for _, existing := range f.stored {
+		owner := existing.UserID()
+		if owner.Equals(userID) {
+			found = append(found, existing)
+		}
+	}
+	sort.Slice(found, func(first, second int) bool {
+		return found[first].Name() < found[second].Name()
+	})
+	return found, nil
+}
+
 // fakeTransactions implementa transaction.Repository.
 type fakeTransactions struct {
 	stored  map[string]*transaction.Transaction
@@ -107,6 +128,63 @@ func (f *fakeTransactions) FindByID(_ context.Context, id transaction.Transactio
 	return found, nil
 }
 
+// List aplica os filtros do critério em memória: é o que permite o teste do
+// use case verificar que ele traduziu o input em Criteria corretamente.
+func (f *fakeTransactions) List(_ context.Context, criteria transaction.Criteria) ([]*transaction.Transaction, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+
+	found := make([]*transaction.Transaction, 0, len(f.stored))
+	for _, existing := range f.stored {
+		if !f.matches(existing, criteria) {
+			continue
+		}
+		found = append(found, existing)
+	}
+
+	// Extrato do recente pro antigo, igual ao repositório real.
+	sort.Slice(found, func(first, second int) bool {
+		return found[first].OccurredAt().After(found[second].OccurredAt())
+	})
+
+	page := criteria.Page()
+	if page.Offset() >= len(found) {
+		return []*transaction.Transaction{}, nil
+	}
+	end := page.Offset() + page.Limit()
+	if end > len(found) {
+		end = len(found)
+	}
+	return found[page.Offset():end], nil
+}
+
+// matches aplica dono e filtros opcionais.
+func (f *fakeTransactions) matches(candidate *transaction.Transaction, criteria transaction.Criteria) bool {
+	owner := candidate.UserID()
+	if !owner.Equals(criteria.UserID()) {
+		return false
+	}
+	if accountID, ok := criteria.AccountID(); ok {
+		if !candidate.AccountID().Equals(accountID) {
+			return false
+		}
+	}
+	if categoryID, ok := criteria.CategoryID(); ok {
+		assignment, assigned := candidate.Category()
+		if !assigned || !assignment.CategoryID().Equals(categoryID) {
+			return false
+		}
+	}
+	if from, ok := criteria.From(); ok && candidate.OccurredAt().Before(from) {
+		return false
+	}
+	if to, ok := criteria.To(); ok && candidate.OccurredAt().After(to) {
+		return false
+	}
+	return true
+}
+
 // fakeCategories implementa category.Repository.
 type fakeCategories struct {
 	stored  map[string]*category.Category
@@ -140,6 +218,24 @@ func (f *fakeCategories) FindByID(_ context.Context, id category.CategoryID) (*c
 	if !ok {
 		return nil, category.ErrNotFound
 	}
+	return found, nil
+}
+
+func (f *fakeCategories) ListByUser(_ context.Context, userID shared.UserID) ([]*category.Category, error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+
+	found := make([]*category.Category, 0, len(f.stored))
+	for _, existing := range f.stored {
+		owner := existing.UserID()
+		if owner.Equals(userID) {
+			found = append(found, existing)
+		}
+	}
+	sort.Slice(found, func(first, second int) bool {
+		return found[first].Name() < found[second].Name()
+	})
 	return found, nil
 }
 
@@ -274,6 +370,21 @@ func newManualTransaction(t *testing.T, ownerID uuid.UUID, accountID account.Acc
 		accountID,
 		mustMoney(t, amount, currencyCode),
 		time.Now().Add(-time.Hour),
+		"Mercado",
+	)
+	require.NoError(t, err)
+	return recorded
+}
+
+// newManualTransactionAt cria lançamento com instante controlado, pra os
+// testes de ordem e período não dependerem do relógio.
+func newManualTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.AccountID, amount int64, occurredAt time.Time) *transaction.Transaction {
+	t.Helper()
+	recorded, err := transaction.NewManual(
+		mustUserID(t, ownerID),
+		accountID,
+		mustMoney(t, amount, "BRL"),
+		occurredAt,
 		"Mercado",
 	)
 	require.NoError(t, err)
