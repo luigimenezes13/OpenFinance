@@ -12,12 +12,10 @@ import (
 	"database/sql"
 	"fmt"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
-
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo/ent"
 	entuser "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo/ent/user"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 )
 
 // NewClient monta o client do Ent deste BC sobre um *sql.DB já configurado.
@@ -27,8 +25,7 @@ import (
 // necessidade. O que é separado por BC é o SCHEMA e o histórico de
 // migrations, não a conexão.
 func NewClient(database *sql.DB) *ent.Client {
-	driver := entsql.OpenDB(dialect.Postgres, database)
-	return ent.NewClient(ent.Driver(driver))
+	return ent.NewClient(ent.Driver(db.NewAmbientDriver(database)))
 }
 
 // UserRepository implementa identity.Repository.

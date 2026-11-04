@@ -23,10 +23,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
-
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent"
+	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 )
 
 // NewClient monta o client do Ent sobre um *sql.DB já configurado (pool e
@@ -36,8 +34,7 @@ import (
 // compartilhado por todos os repositórios e pelo health check; abrir por
 // adapter multiplicaria conexões sem necessidade.
 func NewClient(database *sql.DB) *ent.Client {
-	driver := entsql.OpenDB(dialect.Postgres, database)
-	return ent.NewClient(ent.Driver(driver))
+	return ent.NewClient(ent.Driver(db.NewAmbientDriver(database)))
 }
 
 // withTx roda `work` dentro de uma transação do Ent: commit no sucesso,
