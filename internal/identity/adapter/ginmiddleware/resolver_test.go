@@ -12,13 +12,11 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 	"github.com/luigimenezes13/financial-manager/internal/identity/application"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
-	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
-// Fakes mínimos: o resolvedor é testado com o use case REAL, porque o que
-// interessa aqui é a cola entre os dois (propagação de erro e conversão do
-// uuid), não o comportamento do use case — que tem os seus próprios testes.
-
+// fakeUsers is the minimal repository for testing the resolver against the
+// REAL use case: the target is the glue between them (error propagation and
+// uuid conversion), not the use case behaviour, which has its own tests.
 type fakeUsers struct {
 	stored  map[string]*identity.User
 	findErr error
@@ -30,6 +28,7 @@ func (f *fakeUsers) Save(_ context.Context, user *identity.User) error {
 	}
 	external := user.ExternalIdentity()
 	f.stored[external.Subject()] = user
+	user.ClearEvents()
 	return nil
 }
 
@@ -60,12 +59,6 @@ func (f *fakeVerifier) Verify(context.Context, string) (identity.VerifiedIdentit
 	return f.verified, nil
 }
 
-type noopDispatcher struct{}
-
-func (noopDispatcher) Register(string, events.Handler) {}
-
-func (noopDispatcher) Dispatch(context.Context, ...events.Event) error { return nil }
-
 func googleIdentity() identity.VerifiedIdentity {
 	return identity.VerifiedIdentity{
 		Provider:      identity.ProviderGoogle,
@@ -76,42 +69,48 @@ func googleIdentity() identity.VerifiedIdentity {
 	}
 }
 
-// TestUserResolverProvisionaEDevolveUUIDLocal: o resolvedor entrega ao
-// middleware o uuid LOCAL — nunca o subject do provedor, que é o que
-// atravessaria se a cola estivesse errada.
-func TestUserResolverProvisionaEDevolveUUIDLocal(t *testing.T) {
-	users := &fakeUsers{}
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()}, noopDispatcher{})
-	resolve := ginmiddleware.UserResolverFrom(useCase)
+func TestUserResolver(t *testing.T) {
+	t.Run("should provision the user and return the LOCAL uuid, never the provider subject", func(t *testing.T) {
+		users := &fakeUsers{}
+		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
+		resolve := ginmiddleware.UserResolverFrom(useCase)
 
-	userID, err := resolve(context.Background(), "token-abc")
+		userID, err := resolve(context.Background(), "token-abc")
 
-	require.NoError(t, err)
-	assert.NotEqual(t, uuid.Nil, userID)
-	assert.NotEqual(t, "google-sub-123", userID.String())
+		require.NoError(t, err)
+		assert.NotEqual(t, uuid.Nil, userID)
+		assert.NotEqual(t, "google-sub-123", userID.String())
+	})
 
-	// Segunda chamada com o mesmo token devolve o MESMO usuário local: é o
-	// que garante que cada request de uma sessão fala do mesmo dono.
-	again, err := resolve(context.Background(), "token-abc")
-	require.NoError(t, err)
-	assert.Equal(t, userID, again)
+	t.Run("should return the same local user for every request of a session", func(t *testing.T) {
+		users := &fakeUsers{}
+		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
+		resolve := ginmiddleware.UserResolverFrom(useCase)
+
+		userID, err := resolve(context.Background(), "token-abc")
+		require.NoError(t, err)
+		again, err := resolve(context.Background(), "token-abc")
+
+		require.NoError(t, err)
+		assert.Equal(t, userID, again)
+	})
 }
 
-// TestUserResolverPropagaErro: sem isso, o middleware receberia uuid.Nil sem
-// erro e o request seguiria como um usuário que não existe.
-func TestUserResolverPropagaErro(t *testing.T) {
+func TestUserResolverError(t *testing.T) {
+	errDatabaseDown := errors.New("database down")
+
 	cases := []struct {
 		name    string
 		arrange func(users *fakeUsers, verifier *fakeVerifier)
 		wantErr error
 	}{
 		{
-			name:    "token inválido",
+			name:    "should return an invalid token error with a nil uuid",
 			arrange: func(_ *fakeUsers, verifier *fakeVerifier) { verifier.err = identity.ErrInvalidToken },
 			wantErr: identity.ErrInvalidToken,
 		},
 		{
-			name: "e-mail não verificado",
+			name: "should return an unverified email error with a nil uuid",
 			arrange: func(_ *fakeUsers, verifier *fakeVerifier) {
 				verified := googleIdentity()
 				verified.EmailVerified = false
@@ -120,9 +119,9 @@ func TestUserResolverPropagaErro(t *testing.T) {
 			wantErr: identity.ErrEmailNotVerified,
 		},
 		{
-			name:    "falha lendo o usuário",
-			arrange: func(users *fakeUsers, _ *fakeVerifier) { users.findErr = errors.New("banco fora") },
-			wantErr: nil, // erro de infra, checado abaixo
+			name:    "should return a failure reading the user with a nil uuid",
+			arrange: func(users *fakeUsers, _ *fakeVerifier) { users.findErr = errDatabaseDown },
+			wantErr: errDatabaseDown,
 		},
 	}
 
@@ -131,17 +130,13 @@ func TestUserResolverPropagaErro(t *testing.T) {
 			users := &fakeUsers{}
 			verifier := &fakeVerifier{verified: googleIdentity()}
 			testCase.arrange(users, verifier)
-
-			useCase := application.NewSignInUseCase(users, verifier, noopDispatcher{})
+			useCase := application.NewSignInUseCase(users, verifier)
 			resolve := ginmiddleware.UserResolverFrom(useCase)
 
 			userID, err := resolve(context.Background(), "token-abc")
 
-			require.Error(t, err)
-			if testCase.wantErr != nil {
-				require.ErrorIs(t, err, testCase.wantErr)
-			}
-			assert.Equal(t, uuid.Nil, userID, "erro nunca vem com uuid utilizável")
+			require.ErrorIs(t, err, testCase.wantErr)
+			assert.Equal(t, uuid.Nil, userID, "an error never comes with a usable uuid, or the request would go on as a user that does not exist")
 		})
 	}
 }

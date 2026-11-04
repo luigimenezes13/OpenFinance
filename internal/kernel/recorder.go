@@ -27,13 +27,13 @@ func (r *EventRecorder) RecordEvent(event events.Event) {
 }
 
 // Events retorna CÓPIA dos eventos acumulados — expor o slice interno
-// deixaria o chamador mutar o histórico por fora do root. O use case lê
-// após persistir: Save → Dispatch → ClearEvents.
+// deixaria o chamador mutar o histórico por fora do root. Quem lê é o
+// repositório, que grava os eventos no outbox na mesma transação do Save.
 func (r *EventRecorder) Events() []events.Event {
 	return slices.Clone(r.events)
 }
 
-// ClearEvents descarta os eventos já despachados.
+// ClearEvents descarta os eventos depois que o Save os gravou no outbox.
 func (r *EventRecorder) ClearEvents() {
 	r.events = nil
 }

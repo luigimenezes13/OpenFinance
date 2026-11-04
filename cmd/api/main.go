@@ -2,7 +2,7 @@
 // conhece tipos concretos de infraestrutura.
 //
 // É aqui que a inversão de dependência se paga de verdade. Trocar Postgres
-// por outro banco, o dispatcher in-process por outbox, ou o mock de Open
+// por outro banco, o River por outra fila do outbox, ou o mock de Open
 // Finance pela Pluggy é trocar a linha que INSTANCIA — nenhum use case,
 // nenhum aggregate, nenhum handler muda. A prova prática: a persistência já
 // mudou de pgx cru pra Ent sem tocar em domain/ nem application/.
@@ -27,17 +27,12 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/ginhandler"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/openfinance/mockprovider"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/application"
-	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
-	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 	identityentrepo "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
 	identityginhandler "github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginhandler"
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 	identityapplication "github.com/luigimenezes13/financial-manager/internal/identity/application"
-	identitydomain "github.com/luigimenezes13/financial-manager/internal/identity/domain"
-	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 	"github.com/luigimenezes13/financial-manager/internal/platform/config"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
-	platformevents "github.com/luigimenezes13/financial-manager/internal/platform/events"
 	"github.com/luigimenezes13/financial-manager/internal/platform/httpmiddleware"
 )
 
@@ -101,7 +96,6 @@ func run(logger *slog.Logger) error {
 	transactions := entrepo.NewTransactionRepository(entClient, writer)
 	categories := entrepo.NewCategoryRepository(entClient, unitOfWork)
 	provider := mockprovider.New()
-	dispatcher := platformevents.NewInProcessDispatcher(logger)
 
 	users := identityentrepo.NewUserRepository(identityClient, writer)
 	// Qual verificador entra é decidido em tempo de COMPILAÇÃO (ver
@@ -112,10 +106,8 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	registerEventLogging(dispatcher, logger)
-
 	// --- Use cases (só conhecem as portas) ---
-	signIn := identityapplication.NewSignInUseCase(users, verifier, dispatcher)
+	signIn := identityapplication.NewSignInUseCase(users, verifier)
 	viewProfile := identityapplication.NewViewProfileUseCase(users)
 
 	createAccount := application.NewCreateAccountUseCase(accounts)
@@ -131,8 +123,8 @@ func run(logger *slog.Logger) error {
 	listTransactions := application.NewListTransactionsUseCase(transactions)
 	viewTransaction := application.NewViewTransactionUseCase(transactions)
 	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts)
-	categorizeTransaction := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
-	importFromProvider := application.NewImportFromProviderUseCase(transactions, accounts, provider, dispatcher)
+	categorizeTransaction := application.NewCategorizeTransactionUseCase(transactions, categories)
+	importFromProvider := application.NewImportFromProviderUseCase(transactions, accounts, provider, unitOfWork)
 
 	// --- Borda HTTP ---
 	router := gin.New()
@@ -205,26 +197,4 @@ func serve(ctx context.Context, logger *slog.Logger, configuration config.Config
 	defer cancel()
 
 	return server.Shutdown(shutdownCtx)
-}
-
-// registerEventLogging assina os eventos de domínio com um handler de LOG.
-//
-// No v1 nenhum consumidor reage de verdade (Budgets e Goals são PR5), mas
-// registrar o log aqui serve a dois propósitos: prova que a assinatura do
-// dispatcher funciona ponta a ponta, e dá rastro observável de que o
-// aggregate emitiu o fato certo no momento certo.
-func registerEventLogging(dispatcher *platformevents.InProcessDispatcher, logger *slog.Logger) {
-	logEvent := func(ctx context.Context, event events.Event) error {
-		logger.InfoContext(ctx, "evento de domínio",
-			slog.String("event", event.EventName()),
-			slog.Time("occurred_at", event.OccurredAt()),
-		)
-		return nil
-	}
-
-	dispatcher.Register(transaction.EventTypeImported, logEvent)
-	dispatcher.Register(transaction.EventTypeCategorized, logEvent)
-	dispatcher.Register(transaction.EventTypeReconciled, logEvent)
-	dispatcher.Register(account.EventTypeBalanceUpdated, logEvent)
-	dispatcher.Register(identitydomain.EventTypeRegistered, logEvent)
 }

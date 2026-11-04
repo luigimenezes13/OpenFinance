@@ -14,94 +14,106 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 )
 
-// TestCategorizeTransactionUseCase_Execute cobre o caminho feliz e a ordem
-// Save → Dispatch → ClearEvents: o evento sai DEPOIS de persistir, e o
-// aggregate fica com o histórico limpo.
-func TestCategorizeTransactionUseCase_Execute(t *testing.T) {
-	t.Parallel()
+type categorizeScenario struct {
+	ownerID        uuid.UUID
+	target         *transaction.Transaction
+	targetCategory *category.Category
+	transactions   *fakeTransactions
+	categories     *fakeCategories
+	useCase        *application.CategorizeTransactionUseCase
+}
 
-	ownerID := uuid.New()
-	targetAccount := newManualAccount(t, ownerID, "BRL")
-	accountID := targetAccount.ID()
-	target := newManualTransaction(t, ownerID, accountID, -3200, "BRL")
-	targetCategory := newCategory(t, ownerID, "Alimentação")
+func newCategorizeScenario(t *testing.T, transactionOwner uuid.UUID, categoryOwner uuid.UUID) categorizeScenario {
+	t.Helper()
 
+	targetAccount := newManualAccount(t, transactionOwner, "BRL")
+	target := newManualTransaction(t, transactionOwner, targetAccount.ID(), -3200, "BRL")
+	targetCategory := newCategory(t, categoryOwner, "Food")
 	transactions := newFakeTransactions(target)
 	categories := newFakeCategories(targetCategory)
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
 
-	transactionID := target.ID()
-	categoryID := targetCategory.ID()
-	output, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-		UserID:        ownerID,
+	return categorizeScenario{
+		ownerID:        transactionOwner,
+		target:         target,
+		targetCategory: targetCategory,
+		transactions:   transactions,
+		categories:     categories,
+		useCase:        application.NewCategorizeTransactionUseCase(transactions, categories),
+	}
+}
+
+func (s categorizeScenario) validInput() application.CategorizeTransactionInput {
+	transactionID := s.target.ID()
+	categoryID := s.targetCategory.ID()
+	return application.CategorizeTransactionInput{
+		UserID:        s.ownerID,
 		TransactionID: transactionID.UUID(),
 		CategoryID:    categoryID.UUID(),
 		AssignedBy:    "user",
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, transactionID.String(), output.TransactionID)
-	assert.Equal(t, categoryID.String(), output.CategoryID)
-	assert.Equal(t, "user", output.AssignedBy)
-	assert.False(t, output.AssignedAt.IsZero())
-
-	require.Len(t, transactions.saved, 1, "a transação categorizada tem que ser persistida")
-	assert.Equal(t, []string{transaction.EventTypeCategorized}, dispatcher.eventNames())
-	assert.Empty(t, target.Events(), "ClearEvents roda depois do dispatch")
-	assert.Empty(t, categories.saved, "a categoria é só LIDA neste use case")
+	}
 }
 
-// TestCategorizeTransactionUseCase_Execute_Recategoriza cobre a decisão de
-// domínio de 2026-07-07: trocar a categoria SUBSTITUI a atribuição e
-// RE-EMITE o evento (Budgets precisa saber da troca).
-func TestCategorizeTransactionUseCase_Execute_Recategoriza(t *testing.T) {
+func TestCategorizeTransaction(t *testing.T) {
 	t.Parallel()
 
-	ownerID := uuid.New()
-	targetAccount := newManualAccount(t, ownerID, "BRL")
-	accountID := targetAccount.ID()
-	target := newManualTransaction(t, ownerID, accountID, -3200, "BRL")
-	first := newCategory(t, ownerID, "Alimentação")
-	second := newCategory(t, ownerID, "Restaurantes")
+	t.Run("should save the categorized transaction with the Categorized event and only read the category", func(t *testing.T) {
+		t.Parallel()
 
-	transactions := newFakeTransactions(target)
-	categories := newFakeCategories(first, second)
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
+		ownerID := uuid.New()
+		scenario := newCategorizeScenario(t, ownerID, ownerID)
+		transactionID := scenario.target.ID()
+		categoryID := scenario.targetCategory.ID()
 
-	transactionID := target.ID()
-	firstID := first.ID()
-	secondID := second.ID()
+		output, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
 
-	_, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-		UserID: ownerID, TransactionID: transactionID.UUID(), CategoryID: firstID.UUID(), AssignedBy: "user",
+		require.NoError(t, err)
+		assert.Equal(t, transactionID.String(), output.TransactionID)
+		assert.Equal(t, categoryID.String(), output.CategoryID)
+		assert.Equal(t, "user", output.AssignedBy)
+		assert.False(t, output.AssignedAt.IsZero())
+		require.Len(t, scenario.transactions.saved, 1, "the categorized transaction must be persisted")
+		assert.Equal(t, []string{transaction.EventTypeCategorized}, scenario.transactions.savedEventNames())
+		assert.Empty(t, scenario.target.Events(), "the save clears the recorded events")
+		assert.Empty(t, scenario.categories.saved, "the category is only READ by this use case")
 	})
-	require.NoError(t, err)
 
-	output, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-		UserID: ownerID, TransactionID: transactionID.UUID(), CategoryID: secondID.UUID(), AssignedBy: "rule",
+	t.Run("should replace the assignment and save the Categorized event again when recategorizing so budgets learn about the change", func(t *testing.T) {
+		t.Parallel()
+
+		ownerID := uuid.New()
+		scenario := newCategorizeScenario(t, ownerID, ownerID)
+		second := newCategory(t, ownerID, "Restaurants")
+		scenario.categories.stored[second.ID().String()] = second
+		secondID := second.ID()
+
+		_, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
+		require.NoError(t, err)
+		recategorize := scenario.validInput()
+		recategorize.CategoryID = secondID.UUID()
+		recategorize.AssignedBy = "rule"
+		output, err := scenario.useCase.Execute(context.Background(), recategorize)
+
+		require.NoError(t, err)
+		assert.Equal(t, secondID.String(), output.CategoryID)
+		assert.Equal(t, "rule", output.AssignedBy)
+		assert.Equal(t,
+			[]string{transaction.EventTypeCategorized, transaction.EventTypeCategorized},
+			scenario.transactions.savedEventNames(),
+			"recategorizing saves the event again",
+		)
 	})
-	require.NoError(t, err)
-
-	assert.Equal(t, secondID.String(), output.CategoryID)
-	assert.Equal(t, "rule", output.AssignedBy)
-	assert.Len(t, dispatcher.eventNames(), 2, "recategorizar re-emite o evento")
 }
 
-// TestCategorizeTransactionUseCase_Execute_Autorizacao cobre os dois donos
-// que precisam bater: o da transação e o da categoria. Categoria alheia
-// morre em ErrForbidden — responder ErrNotFound vazaria a existência dela.
-func TestCategorizeTransactionUseCase_Execute_Autorizacao(t *testing.T) {
+func TestCategorizeTransactionOwnership(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name             string
-		transactionOwner uuid.UUID
-		categoryOwner    uuid.UUID
+		name                     string
+		transactionOfAnotherUser bool
+		categoryOfAnotherUser    bool
 	}{
-		{name: "transação de outro usuário", transactionOwner: uuid.New(), categoryOwner: uuid.Nil},
-		{name: "categoria de outro usuário", transactionOwner: uuid.Nil, categoryOwner: uuid.New()},
+		{name: "should refuse with ErrForbidden a transaction of another user", transactionOfAnotherUser: true},
+		{name: "should refuse with ErrForbidden a category of another user, since ErrNotFound would leak that it exists", categoryOfAnotherUser: true},
 	}
 
 	for _, testCase := range cases {
@@ -109,44 +121,29 @@ func TestCategorizeTransactionUseCase_Execute_Autorizacao(t *testing.T) {
 			t.Parallel()
 
 			requesterID := uuid.New()
-			transactionOwner := testCase.transactionOwner
-			if transactionOwner == uuid.Nil {
-				transactionOwner = requesterID
-			}
-			categoryOwner := testCase.categoryOwner
-			if categoryOwner == uuid.Nil {
-				categoryOwner = requesterID
-			}
+			transactionOwner := ownerOrRequester(requesterID, testCase.transactionOfAnotherUser)
+			categoryOwner := ownerOrRequester(requesterID, testCase.categoryOfAnotherUser)
+			scenario := newCategorizeScenario(t, transactionOwner, categoryOwner)
+			input := scenario.validInput()
+			input.UserID = requesterID
 
-			targetAccount := newManualAccount(t, transactionOwner, "BRL")
-			accountID := targetAccount.ID()
-			target := newManualTransaction(t, transactionOwner, accountID, -1000, "BRL")
-			targetCategory := newCategory(t, categoryOwner, "Alimentação")
-
-			transactions := newFakeTransactions(target)
-			categories := newFakeCategories(targetCategory)
-			dispatcher := &fakeDispatcher{}
-			useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
-
-			transactionID := target.ID()
-			categoryID := targetCategory.ID()
-			_, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-				UserID:        requesterID,
-				TransactionID: transactionID.UUID(),
-				CategoryID:    categoryID.UUID(),
-				AssignedBy:    "user",
-			})
+			_, err := scenario.useCase.Execute(context.Background(), input)
 
 			require.ErrorIs(t, err, shared.ErrForbidden)
-			assert.Empty(t, transactions.saved)
-			assert.Empty(t, dispatcher.dispatched)
+			assert.Empty(t, scenario.transactions.saved)
+			assert.Empty(t, scenario.transactions.savedEvents)
 		})
 	}
 }
 
-// TestCategorizeTransactionUseCase_Execute_Recusa cobre inputs inválidos e
-// aggregates inexistentes.
-func TestCategorizeTransactionUseCase_Execute_Recusa(t *testing.T) {
+func ownerOrRequester(requesterID uuid.UUID, ownedByAnotherUser bool) uuid.UUID {
+	if ownedByAnotherUser {
+		return uuid.New()
+	}
+	return requesterID
+}
+
+func TestCategorizeTransactionRefusal(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -155,32 +152,32 @@ func TestCategorizeTransactionUseCase_Execute_Recusa(t *testing.T) {
 		wantErr     error
 	}{
 		{
-			name:        "usuário nil",
+			name:        "should refuse a nil user",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.UserID = uuid.Nil },
 			wantErr:     shared.ErrInvalidUserID,
 		},
 		{
-			name:        "transação nil",
+			name:        "should refuse a nil transaction",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.TransactionID = uuid.Nil },
 			wantErr:     transaction.ErrInvalidID,
 		},
 		{
-			name:        "categoria nil",
+			name:        "should refuse a nil category",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.CategoryID = uuid.Nil },
 			wantErr:     category.ErrInvalidID,
 		},
 		{
-			name:        "assignedBy fora do vocabulário",
+			name:        "should refuse an assignedBy outside the vocabulary",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.AssignedBy = "robot" },
 			wantErr:     transaction.ErrInvalidAssignment,
 		},
 		{
-			name:        "transação inexistente",
+			name:        "should refuse a missing transaction",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.TransactionID = uuid.New() },
 			wantErr:     transaction.ErrNotFound,
 		},
 		{
-			name:        "categoria inexistente",
+			name:        "should refuse a missing category",
 			mutateInput: func(input *application.CategorizeTransactionInput) { input.CategoryID = uuid.New() },
 			wantErr:     category.ErrNotFound,
 		},
@@ -191,69 +188,20 @@ func TestCategorizeTransactionUseCase_Execute_Recusa(t *testing.T) {
 			t.Parallel()
 
 			ownerID := uuid.New()
-			targetAccount := newManualAccount(t, ownerID, "BRL")
-			accountID := targetAccount.ID()
-			target := newManualTransaction(t, ownerID, accountID, -1000, "BRL")
-			targetCategory := newCategory(t, ownerID, "Alimentação")
-
-			transactions := newFakeTransactions(target)
-			categories := newFakeCategories(targetCategory)
-			dispatcher := &fakeDispatcher{}
-			useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
-
-			transactionID := target.ID()
-			categoryID := targetCategory.ID()
-			input := application.CategorizeTransactionInput{
-				UserID:        ownerID,
-				TransactionID: transactionID.UUID(),
-				CategoryID:    categoryID.UUID(),
-				AssignedBy:    "user",
-			}
+			scenario := newCategorizeScenario(t, ownerID, ownerID)
+			input := scenario.validInput()
 			testCase.mutateInput(&input)
 
-			_, err := useCase.Execute(context.Background(), input)
+			_, err := scenario.useCase.Execute(context.Background(), input)
 
 			require.ErrorIs(t, err, testCase.wantErr)
-			assert.Empty(t, transactions.saved)
-			assert.Empty(t, dispatcher.dispatched)
+			assert.Empty(t, scenario.transactions.saved)
+			assert.Empty(t, scenario.transactions.savedEvents)
 		})
 	}
 }
 
-// TestCategorizeTransactionUseCase_Execute_DispatchFalhando cobre a regra do
-// v1: dispatcher síncrono, erro de handler aborta o use case. E o aggregate
-// NÃO perde os eventos — ClearEvents só roda se o dispatch deu certo.
-func TestCategorizeTransactionUseCase_Execute_DispatchFalhando(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	targetAccount := newManualAccount(t, ownerID, "BRL")
-	accountID := targetAccount.ID()
-	target := newManualTransaction(t, ownerID, accountID, -1000, "BRL")
-	targetCategory := newCategory(t, ownerID, "Alimentação")
-
-	transactions := newFakeTransactions(target)
-	categories := newFakeCategories(targetCategory)
-	dispatcher := &fakeDispatcher{dispatchErr: errInfra}
-	useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
-
-	transactionID := target.ID()
-	categoryID := targetCategory.ID()
-	_, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-		UserID:        ownerID,
-		TransactionID: transactionID.UUID(),
-		CategoryID:    categoryID.UUID(),
-		AssignedBy:    "user",
-	})
-
-	require.ErrorIs(t, err, errInfra)
-	require.Len(t, transactions.saved, 1, "o Save já tinha acontecido — o v1 não tem transação de banco aqui")
-	assert.Len(t, target.Events(), 1, "evento não despachado fica no aggregate")
-}
-
-// TestCategorizeTransactionUseCase_Execute_PropagaErroDeInfra cobre as três
-// fronteiras de persistência deste use case.
-func TestCategorizeTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
+func TestCategorizeTransactionInfrastructureFailure(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -261,15 +209,15 @@ func TestCategorizeTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 		arrange func(transactions *fakeTransactions, categories *fakeCategories)
 	}{
 		{
-			name:    "falha lendo a transação",
+			name:    "should return the error when reading the transaction fails",
 			arrange: func(transactions *fakeTransactions, _ *fakeCategories) { transactions.findErr = errInfra },
 		},
 		{
-			name:    "falha lendo a categoria",
+			name:    "should return the error when reading the category fails",
 			arrange: func(_ *fakeTransactions, categories *fakeCategories) { categories.findErr = errInfra },
 		},
 		{
-			name:    "falha gravando a transação",
+			name:    "should return the error when saving the transaction fails",
 			arrange: func(transactions *fakeTransactions, _ *fakeCategories) { transactions.saveErr = errInfra },
 		},
 	}
@@ -279,29 +227,26 @@ func TestCategorizeTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 			t.Parallel()
 
 			ownerID := uuid.New()
-			targetAccount := newManualAccount(t, ownerID, "BRL")
-			accountID := targetAccount.ID()
-			target := newManualTransaction(t, ownerID, accountID, -1000, "BRL")
-			targetCategory := newCategory(t, ownerID, "Alimentação")
+			scenario := newCategorizeScenario(t, ownerID, ownerID)
+			testCase.arrange(scenario.transactions, scenario.categories)
 
-			transactions := newFakeTransactions(target)
-			categories := newFakeCategories(targetCategory)
-			testCase.arrange(transactions, categories)
-
-			dispatcher := &fakeDispatcher{}
-			useCase := application.NewCategorizeTransactionUseCase(transactions, categories, dispatcher)
-
-			transactionID := target.ID()
-			categoryID := targetCategory.ID()
-			_, err := useCase.Execute(context.Background(), application.CategorizeTransactionInput{
-				UserID:        ownerID,
-				TransactionID: transactionID.UUID(),
-				CategoryID:    categoryID.UUID(),
-				AssignedBy:    "user",
-			})
+			_, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
 
 			require.ErrorIs(t, err, errInfra)
-			assert.Empty(t, dispatcher.dispatched, "evento não sai se a persistência falhou")
+			assert.Empty(t, scenario.transactions.savedEvents, "no event is saved when persistence fails")
 		})
 	}
+
+	t.Run("should keep the Categorized event on the aggregate when saving fails", func(t *testing.T) {
+		t.Parallel()
+
+		ownerID := uuid.New()
+		scenario := newCategorizeScenario(t, ownerID, ownerID)
+		scenario.transactions.saveErr = errInfra
+
+		_, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
+
+		require.ErrorIs(t, err, errInfra)
+		assert.Len(t, scenario.target.Events(), 1, "an unsaved event stays on the aggregate")
+	})
 }

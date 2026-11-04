@@ -15,13 +15,14 @@ import (
 
 var errInfra = errors.New("fake: infrastructure failure")
 
-// --- Fakes das portas ----------------------------------------------------
-
+// fakeUsers behaves like the real repository: a successful Save records the
+// aggregate's pending events and clears them; a failing Save keeps them.
 type fakeUsers struct {
-	stored  map[string]*identity.User
-	saved   []*identity.User
-	saveErr error
-	findErr error
+	stored      map[string]*identity.User
+	saved       []*identity.User
+	savedEvents []events.Event
+	saveErr     error
+	findErr     error
 }
 
 func newFakeUsers(stored ...*identity.User) *fakeUsers {
@@ -32,7 +33,6 @@ func newFakeUsers(stored ...*identity.User) *fakeUsers {
 	return fake
 }
 
-// externalKey indexa por (provedor, subject) — é a busca do login.
 func externalKey(external identity.ExternalIdentity) string {
 	return external.Provider() + "|" + external.Subject()
 }
@@ -43,6 +43,8 @@ func (f *fakeUsers) Save(_ context.Context, user *identity.User) error {
 	}
 	f.stored[externalKey(user.ExternalIdentity())] = user
 	f.saved = append(f.saved, user)
+	f.savedEvents = append(f.savedEvents, user.Events()...)
+	user.ClearEvents()
 	return nil
 }
 
@@ -84,29 +86,13 @@ func (f *fakeVerifier) Verify(_ context.Context, rawToken string) (identity.Veri
 	return f.verified, nil
 }
 
-type fakeDispatcher struct {
-	dispatched  []events.Event
-	dispatchErr error
-}
-
-func (f *fakeDispatcher) Register(_ string, _ events.Handler) {}
-
-func (f *fakeDispatcher) Dispatch(_ context.Context, dispatched ...events.Event) error {
-	if f.dispatchErr != nil {
-		return f.dispatchErr
-	}
-	f.dispatched = append(f.dispatched, dispatched...)
-	return nil
-}
-
-// googleIdentity monta o que o verificador devolveria num login normal.
 func googleIdentity() identity.VerifiedIdentity {
 	return identity.VerifiedIdentity{
 		Provider:      identity.ProviderGoogle,
 		Subject:       "google-sub-123",
 		Email:         "Luigi@Example.com",
 		Name:          "Luigi Menezes",
-		AvatarURL:     "https://lh3.googleusercontent.com/a/foto.jpg",
+		AvatarURL:     "https://lh3.googleusercontent.com/a/photo.jpg",
 		EmailVerified: true,
 	}
 }
@@ -125,143 +111,177 @@ func mustUser(t *testing.T, verified identity.VerifiedIdentity) *identity.User {
 	return registered
 }
 
-// --- Testes --------------------------------------------------------------
-
-// TestPrimeiroAcessoRegistra é o coração do provisionamento just-in-time:
-// token válido de quem o sistema não conhece significa primeiro acesso.
-func TestPrimeiroAcessoRegistra(t *testing.T) {
-	t.Parallel()
-
-	users := newFakeUsers()
-	verifier := &fakeVerifier{verified: googleIdentity()}
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewSignInUseCase(users, verifier, dispatcher)
-
-	output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-	require.NoError(t, err)
-	assert.True(t, output.Registered, "primeiro acesso registra")
-	assert.Equal(t, "luigi@example.com", output.Email, "o e-mail é guardado canonicalizado")
-	assert.Equal(t, "Luigi Menezes", output.Name)
-	assert.NotEmpty(t, output.UserID)
-
-	assert.Equal(t, "token-abc", verifier.calledWithToken)
-	require.Len(t, users.saved, 1)
-
-	require.Len(t, dispatcher.dispatched, 1, "registro publica o evento")
-	assert.Equal(t, identity.EventTypeRegistered, dispatcher.dispatched[0].EventName())
-	assert.Empty(t, users.saved[0].Events(), "ClearEvents roda depois do dispatch")
+func signIn(users *fakeUsers, verifier *fakeVerifier, rawToken string) (application.SignInOutput, error) {
+	useCase := application.NewSignInUseCase(users, verifier)
+	return useCase.Execute(context.Background(), application.SignInInput{RawToken: rawToken})
 }
 
-// TestSegundoAcessoNaoRegistraNemGrava: login de quem já existe e não mudou
-// nada é LEITURA. Gravar aqui seria uma escrita por request sem fato novo.
-func TestSegundoAcessoNaoRegistraNemGrava(t *testing.T) {
+func TestSignIn(t *testing.T) {
 	t.Parallel()
 
-	verified := googleIdentity()
-	existing := mustUser(t, verified)
-	users := newFakeUsers(existing)
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, dispatcher)
+	t.Run("should register the user on first access because a valid token from an unknown subject means first access", func(t *testing.T) {
+		t.Parallel()
 
-	output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+		users := newFakeUsers()
+		verifier := &fakeVerifier{verified: googleIdentity()}
 
-	require.NoError(t, err)
-	assert.False(t, output.Registered)
-	assert.Equal(t, existing.ID().String(), output.UserID, "é o MESMO usuário local")
-	assert.Empty(t, users.saved, "nada mudou, nada a gravar")
-	assert.Empty(t, dispatcher.dispatched, "registro só acontece uma vez")
+		output, err := signIn(users, verifier, "token-abc")
+
+		require.NoError(t, err)
+		assert.True(t, output.Registered, "first access registers")
+		assert.Equal(t, "luigi@example.com", output.Email, "the email is stored canonicalized")
+		assert.Equal(t, "Luigi Menezes", output.Name)
+		assert.NotEmpty(t, output.UserID)
+		assert.Equal(t, "token-abc", verifier.calledWithToken)
+		require.Len(t, users.saved, 1)
+		require.Len(t, users.savedEvents, 1, "registration saves the event")
+		assert.Equal(t, identity.EventTypeRegistered, users.savedEvents[0].EventName())
+		assert.Empty(t, users.saved[0].Events(), "the save clears the recorded events")
+	})
+
+	t.Run("should neither register nor save when an unchanged user signs in again", func(t *testing.T) {
+		t.Parallel()
+
+		verified := googleIdentity()
+		existing := mustUser(t, verified)
+		users := newFakeUsers(existing)
+
+		output, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
+
+		require.NoError(t, err)
+		assert.False(t, output.Registered)
+		assert.Equal(t, existing.ID().String(), output.UserID, "it is the SAME local user")
+		assert.Empty(t, users.saved, "nothing changed, nothing to save")
+		assert.Empty(t, users.savedEvents, "registration happens only once")
+	})
+
+	t.Run("should sync the profile updated at the provider and keep the local user id", func(t *testing.T) {
+		t.Parallel()
+
+		existing := mustUser(t, googleIdentity())
+		users := newFakeUsers(existing)
+		updated := googleIdentity()
+		updated.Email = "new@example.com"
+		updated.Name = "Luigi M."
+
+		output, err := signIn(users, &fakeVerifier{verified: updated}, "token-abc")
+
+		require.NoError(t, err)
+		assert.False(t, output.Registered)
+		assert.Equal(t, "new@example.com", output.Email)
+		assert.Equal(t, "Luigi M.", output.Name)
+		require.Len(t, users.saved, 1, "it changed, so it saves")
+		assert.Equal(t, existing.ID().String(), output.UserID, "the local UserID does NOT change when the profile changes")
+	})
+
+	t.Run("should create a new user for a new subject because the email is not the user key", func(t *testing.T) {
+		t.Parallel()
+
+		existing := mustUser(t, googleIdentity())
+		users := newFakeUsers(existing)
+		otherSubject := googleIdentity()
+		otherSubject.Subject = "google-sub-999"
+
+		output, err := signIn(users, &fakeVerifier{verified: otherSubject}, "token-xyz")
+
+		require.NoError(t, err)
+		assert.True(t, output.Registered)
+		assert.NotEqual(t, existing.ID().String(), output.UserID)
+	})
+
+	t.Run("should fall back to the email local part when the provider sends no name", func(t *testing.T) {
+		t.Parallel()
+
+		verified := googleIdentity()
+		verified.Name = "   "
+
+		output, err := signIn(newFakeUsers(), &fakeVerifier{verified: verified}, "token-abc")
+
+		require.NoError(t, err)
+		assert.Equal(t, "luigi", output.Name)
+	})
+
+	t.Run("should refuse an unverified email so nobody registers with someone else's address", func(t *testing.T) {
+		t.Parallel()
+
+		verified := googleIdentity()
+		verified.EmailVerified = false
+		users := newFakeUsers()
+
+		_, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
+
+		require.ErrorIs(t, err, identity.ErrEmailNotVerified)
+		assert.Empty(t, users.saved, "no user is created")
+		assert.Empty(t, users.savedEvents)
+	})
+
+	t.Run("should sync the avatar changed at the provider", func(t *testing.T) {
+		t.Parallel()
+
+		existing := mustUser(t, googleIdentity())
+		users := newFakeUsers(existing)
+		updated := googleIdentity()
+		updated.AvatarURL = "https://lh3.googleusercontent.com/a/new.jpg"
+
+		_, err := signIn(users, &fakeVerifier{verified: updated}, "token-abc")
+
+		require.NoError(t, err)
+		require.Len(t, users.saved, 1, "a new avatar is a profile change, so it saves")
+		avatar := users.saved[0].Avatar()
+		assert.Equal(t, "https://lh3.googleusercontent.com/a/new.jpg", avatar.String())
+	})
+
+	t.Run("should clear the avatar removed at the provider", func(t *testing.T) {
+		t.Parallel()
+
+		existing := mustUser(t, googleIdentity())
+		users := newFakeUsers(existing)
+		withoutAvatar := googleIdentity()
+		withoutAvatar.AvatarURL = ""
+
+		_, err := signIn(users, &fakeVerifier{verified: withoutAvatar}, "token-abc")
+
+		require.NoError(t, err)
+		require.Len(t, users.saved, 1)
+		avatar := users.saved[0].Avatar()
+		assert.True(t, avatar.IsZero())
+	})
 }
 
-// TestPerfilAtualizadoNoProvedor: a pessoa trocou nome/e-mail no Google e
-// espera ver refletido aqui.
-func TestPerfilAtualizadoNoProvedor(t *testing.T) {
+func TestSignInInvalidAvatar(t *testing.T) {
 	t.Parallel()
 
-	existing := mustUser(t, googleIdentity())
-	users := newFakeUsers(existing)
+	cases := []string{"javascript:alert(1)", "/relative.png", "", "   "}
 
-	updated := googleIdentity()
-	updated.Email = "novo@example.com"
-	updated.Name = "Luigi M."
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: updated}, &fakeDispatcher{})
+	for _, rawAvatar := range cases {
+		t.Run("should sign in without an avatar because a cosmetic field never blocks access: "+rawAvatar, func(t *testing.T) {
+			t.Parallel()
 
-	output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+			verified := googleIdentity()
+			verified.AvatarURL = rawAvatar
+			users := newFakeUsers()
 
-	require.NoError(t, err)
-	assert.False(t, output.Registered)
-	assert.Equal(t, "novo@example.com", output.Email)
-	assert.Equal(t, "Luigi M.", output.Name)
-	require.Len(t, users.saved, 1, "mudou, então grava")
-	assert.Equal(t, existing.ID().String(), output.UserID, "o UserID local NÃO muda quando o perfil muda")
+			output, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
+
+			require.NoError(t, err)
+			assert.True(t, output.Registered)
+			require.Len(t, users.saved, 1)
+			avatar := users.saved[0].Avatar()
+			assert.True(t, avatar.IsZero(), "an invalid avatar became absence, not an error")
+		})
+	}
 }
 
-// TestSubjectNovoCriaUsuarioNovo: o subject é a âncora. Mesmo e-mail com
-// subject diferente é outra identidade — e-mail não é chave de usuário.
-func TestSubjectNovoCriaUsuarioNovo(t *testing.T) {
-	t.Parallel()
-
-	existing := mustUser(t, googleIdentity())
-	users := newFakeUsers(existing)
-
-	otherSubject := googleIdentity()
-	otherSubject.Subject = "google-sub-999"
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: otherSubject}, &fakeDispatcher{})
-
-	output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-xyz"})
-
-	require.NoError(t, err)
-	assert.True(t, output.Registered)
-	assert.NotEqual(t, existing.ID().String(), output.UserID)
-}
-
-// TestNomeAusenteUsaParteLocalDoEmail: o claim `name` depende dos escopos
-// concedidos, então recusar o login por falta dele seria desproporcional.
-func TestNomeAusenteUsaParteLocalDoEmail(t *testing.T) {
-	t.Parallel()
-
-	verified := googleIdentity()
-	verified.Name = "   "
-	users := newFakeUsers()
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, &fakeDispatcher{})
-
-	output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-	require.NoError(t, err)
-	assert.Equal(t, "luigi", output.Name)
-}
-
-// TestEmailNaoVerificadoEhRecusado é o teste de SEGURANÇA do fluxo: sem essa
-// recusa, alguém se registraria com o e-mail de outra pessoa.
-func TestEmailNaoVerificadoEhRecusado(t *testing.T) {
-	t.Parallel()
-
-	verified := googleIdentity()
-	verified.EmailVerified = false
-	users := newFakeUsers()
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, dispatcher)
-
-	_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-	require.ErrorIs(t, err, identity.ErrEmailNotVerified)
-	assert.Empty(t, users.saved, "usuário nenhum é criado")
-	assert.Empty(t, dispatcher.dispatched)
-}
-
-// TestFalhaDeVerificacaoSobeComoVeio: os sentinels do verificador chegam
-// intactos, porque é a borda HTTP que decide o status (401 vs 401 com
-// "renove o token").
-func TestFalhaDeVerificacaoSobeComoVeio(t *testing.T) {
+func TestSignInVerificationFailure(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name         string
 		fromVerifier error
 	}{
-		{name: "token inválido", fromVerifier: identity.ErrInvalidToken},
-		{name: "token expirado", fromVerifier: identity.ErrTokenExpired},
-		{name: "falha de infraestrutura", fromVerifier: errInfra},
+		{name: "should return an invalid token as is, since the HTTP edge picks the status", fromVerifier: identity.ErrInvalidToken},
+		{name: "should return an expired token as is, since the HTTP edge picks the status", fromVerifier: identity.ErrTokenExpired},
+		{name: "should return an infrastructure failure as is", fromVerifier: errInfra},
 	}
 
 	for _, testCase := range cases {
@@ -269,9 +289,8 @@ func TestFalhaDeVerificacaoSobeComoVeio(t *testing.T) {
 			t.Parallel()
 
 			users := newFakeUsers()
-			useCase := application.NewSignInUseCase(users, &fakeVerifier{err: testCase.fromVerifier}, &fakeDispatcher{})
 
-			_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+			_, err := signIn(users, &fakeVerifier{err: testCase.fromVerifier}, "token-abc")
 
 			require.ErrorIs(t, err, testCase.fromVerifier)
 			assert.Empty(t, users.saved)
@@ -279,9 +298,7 @@ func TestFalhaDeVerificacaoSobeComoVeio(t *testing.T) {
 	}
 }
 
-// TestDadoInvalidoDoProvedor: o provedor é fronteira, não fonte de verdade
-// do domínio. Dado incoerente vindo dele morre nos VOs.
-func TestDadoInvalidoDoProvedor(t *testing.T) {
+func TestSignInInvalidProviderData(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -290,18 +307,18 @@ func TestDadoInvalidoDoProvedor(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "provedor desconhecido",
-			mutate:  func(v *identity.VerifiedIdentity) { v.Provider = "facebook" },
+			name:    "should refuse an unknown provider",
+			mutate:  func(verified *identity.VerifiedIdentity) { verified.Provider = "facebook" },
 			wantErr: identity.ErrInvalidExternalIdentity,
 		},
 		{
-			name:    "subject ausente",
-			mutate:  func(v *identity.VerifiedIdentity) { v.Subject = "" },
+			name:    "should refuse a missing subject",
+			mutate:  func(verified *identity.VerifiedIdentity) { verified.Subject = "" },
 			wantErr: identity.ErrInvalidExternalIdentity,
 		},
 		{
-			name:    "e-mail inválido",
-			mutate:  func(v *identity.VerifiedIdentity) { v.Email = "nao-e-email" },
+			name:    "should refuse an invalid email",
+			mutate:  func(verified *identity.VerifiedIdentity) { verified.Email = "not-an-email" },
 			wantErr: identity.ErrInvalidEmail,
 		},
 	}
@@ -313,9 +330,8 @@ func TestDadoInvalidoDoProvedor(t *testing.T) {
 			verified := googleIdentity()
 			testCase.mutate(&verified)
 			users := newFakeUsers()
-			useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, &fakeDispatcher{})
 
-			_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+			_, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
 
 			require.ErrorIs(t, err, testCase.wantErr)
 			assert.Empty(t, users.saved)
@@ -323,115 +339,30 @@ func TestDadoInvalidoDoProvedor(t *testing.T) {
 	}
 }
 
-// TestPropagaErroDeInfra cobre as fronteiras de persistência e de publicação.
-func TestPropagaErroDeInfra(t *testing.T) {
+func TestSignInInfrastructureFailure(t *testing.T) {
 	t.Parallel()
 
-	t.Run("falha lendo o usuário", func(t *testing.T) {
+	t.Run("should return the error when reading the user fails", func(t *testing.T) {
 		t.Parallel()
 
 		users := newFakeUsers()
 		users.findErr = errInfra
-		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()}, &fakeDispatcher{})
 
-		_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+		_, err := signIn(users, &fakeVerifier{verified: googleIdentity()}, "token-abc")
 
 		require.ErrorIs(t, err, errInfra)
 	})
 
-	t.Run("falha gravando o usuário novo", func(t *testing.T) {
+	t.Run("should save no event when saving the new user fails", func(t *testing.T) {
 		t.Parallel()
 
 		users := newFakeUsers()
 		users.saveErr = errInfra
-		dispatcher := &fakeDispatcher{}
-		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()}, dispatcher)
 
-		_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
+		_, err := signIn(users, &fakeVerifier{verified: googleIdentity()}, "token-abc")
 
 		require.ErrorIs(t, err, errInfra)
-		assert.Empty(t, dispatcher.dispatched, "evento não sai se a persistência falhou")
+		assert.Empty(t, users.saved)
+		assert.Empty(t, users.savedEvents, "no event is saved when persistence fails")
 	})
-
-	t.Run("falha publicando o evento", func(t *testing.T) {
-		t.Parallel()
-
-		users := newFakeUsers()
-		dispatcher := &fakeDispatcher{dispatchErr: errInfra}
-		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()}, dispatcher)
-
-		_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-		require.ErrorIs(t, err, errInfra)
-		require.Len(t, users.saved, 1, "o Save já tinha acontecido")
-		assert.Len(t, users.saved[0].Events(), 1, "evento não despachado fica no aggregate")
-	})
-}
-
-// TestAvatarSincronizadoNoLogin: a pessoa trocou a foto no Google e espera
-// ver a nova.
-func TestAvatarSincronizadoNoLogin(t *testing.T) {
-	t.Parallel()
-
-	existing := mustUser(t, googleIdentity())
-	users := newFakeUsers(existing)
-
-	updated := googleIdentity()
-	updated.AvatarURL = "https://lh3.googleusercontent.com/a/nova.jpg"
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: updated}, &fakeDispatcher{})
-
-	_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-	require.NoError(t, err)
-	require.Len(t, users.saved, 1, "avatar novo é mudança de perfil, então grava")
-	avatar := users.saved[0].Avatar()
-	assert.Equal(t, "https://lh3.googleusercontent.com/a/nova.jpg", avatar.String())
-}
-
-// TestAvatarInvalidoNaoImpedeLogin é a decisão de PROPORCIONALIDADE: avatar é
-// dado cosmético, e recusar a entrada porque o provedor mandou uma URL
-// estranha (ou perigosa) seria desproporcional. Entra sem avatar.
-func TestAvatarInvalidoNaoImpedeLogin(t *testing.T) {
-	t.Parallel()
-
-	cases := []string{"javascript:alert(1)", "/relativo.png", "", "   "}
-
-	for _, rawAvatar := range cases {
-		t.Run("avatar:"+rawAvatar, func(t *testing.T) {
-			t.Parallel()
-
-			verified := googleIdentity()
-			verified.AvatarURL = rawAvatar
-			users := newFakeUsers()
-			useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: verified}, &fakeDispatcher{})
-
-			output, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-			require.NoError(t, err)
-			assert.True(t, output.Registered)
-			require.Len(t, users.saved, 1)
-			avatar := users.saved[0].Avatar()
-			assert.True(t, avatar.IsZero(), "avatar inválido virou ausência, não erro")
-		})
-	}
-}
-
-// TestAvatarRemovidoNoProvedor: apagou a foto no Google, a nossa cópia
-// acompanha.
-func TestAvatarRemovidoNoProvedor(t *testing.T) {
-	t.Parallel()
-
-	existing := mustUser(t, googleIdentity())
-	users := newFakeUsers(existing)
-
-	withoutAvatar := googleIdentity()
-	withoutAvatar.AvatarURL = ""
-	useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: withoutAvatar}, &fakeDispatcher{})
-
-	_, err := useCase.Execute(context.Background(), application.SignInInput{RawToken: "token-abc"})
-
-	require.NoError(t, err)
-	require.Len(t, users.saved, 1)
-	avatar := users.saved[0].Avatar()
-	assert.True(t, avatar.IsZero())
 }

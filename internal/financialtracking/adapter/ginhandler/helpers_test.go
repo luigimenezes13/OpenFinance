@@ -1,12 +1,11 @@
-// Package ginhandler_test testa a borda HTTP de ponta a ponta DENTRO do
-// processo: httptest + gin real + middleware real + use cases REAIS, só com
-// os repositórios e o provider substituídos por fakes em memória.
+// Package ginhandler_test tests the HTTP edge end to end INSIDE the process:
+// httptest, the real gin router, real middleware and REAL use cases, with only
+// the repositories and the provider replaced by in-memory fakes.
 //
-// Por que use case real e não mock do use case: o que estes testes precisam
-// provar é a tradução das duas pontas — request JSON → Input, e sentinel de
-// domínio → status HTTP. Com use case mockado, o teste passaria mesmo se o
-// mapeamento de erro estivesse todo errado, porque o erro nunca nasceria no
-// domínio.
+// The use cases are real, not mocked, because these tests prove the
+// translation at both ends: request JSON to Input, and domain sentinel to
+// HTTP status. With a mocked use case the test would pass even with a wrong
+// error mapping, since the error would never be born in the domain.
 package ginhandler_test
 
 import (
@@ -38,19 +37,33 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/platform/httperror"
 )
 
-// errInfra simula falha de infraestrutura, pra exercitar o 500.
 var errInfra = errors.New("fake: infrastructure failure")
 
-// TestMain silencia o gin: em TestMode ele não imprime as rotas nem loga
-// cada request, e o teste fica legível.
 func TestMain(main *testing.M) {
 	gin.SetMode(gin.TestMode)
 	main.Run()
 }
 
-// --- Fakes das portas ----------------------------------------------------
+// recordedEvents mirrors what the real repositories do inside Save: the
+// aggregate's pending events go to the outbox and are cleared afterwards.
+type recordedEvents struct {
+	savedEvents []events.Event
+}
+
+func (r *recordedEvents) record(pending []events.Event) {
+	r.savedEvents = append(r.savedEvents, pending...)
+}
+
+func (r *recordedEvents) savedEventNames() []string {
+	names := make([]string, 0, len(r.savedEvents))
+	for _, saved := range r.savedEvents {
+		names = append(names, saved.EventName())
+	}
+	return names
+}
 
 type fakeAccounts struct {
+	recordedEvents
 	stored  map[string]*account.Account
 	saveErr error
 	findErr error
@@ -69,6 +82,8 @@ func (f *fakeAccounts) Save(_ context.Context, target *account.Account) error {
 		return f.saveErr
 	}
 	f.stored[target.ID().String()] = target
+	f.record(target.Events())
+	target.ClearEvents()
 	return nil
 }
 
@@ -100,6 +115,7 @@ func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*a
 }
 
 type fakeTransactions struct {
+	recordedEvents
 	stored  map[string]*transaction.Transaction
 	saveErr error
 	listErr error
@@ -118,6 +134,8 @@ func (f *fakeTransactions) Save(_ context.Context, target *transaction.Transacti
 		return f.saveErr
 	}
 	f.stored[target.ID().String()] = target
+	f.record(target.Events())
+	target.ClearEvents()
 	return nil
 }
 
@@ -207,13 +225,12 @@ func (f *fakeCategories) ListByUser(_ context.Context, userID shared.UserID) ([]
 	return found, nil
 }
 
-type fakeDispatcher struct{ dispatched []events.Event }
+// passThroughUnitOfWork runs the work in place: the HTTP edge tests care
+// about translation, not about commit boundaries.
+type passThroughUnitOfWork struct{}
 
-func (f *fakeDispatcher) Register(_ string, _ events.Handler) {}
-
-func (f *fakeDispatcher) Dispatch(_ context.Context, dispatched ...events.Event) error {
-	f.dispatched = append(f.dispatched, dispatched...)
-	return nil
+func (passThroughUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
+	return work(ctx)
 }
 
 type fakeProvider struct {
@@ -239,22 +256,17 @@ func (f *fakeProvider) FetchBalance(_ context.Context, _ string) (openfinance.Pr
 	return openfinance.ProviderBalance{AmountInCents: 0, CurrencyCode: "BRL", AsOf: time.Now()}, nil
 }
 
-// fakePinger permite testar /healthz sem Postgres — inclusive o caminho de
-// falha, que é o que realmente importa num health check.
+// fakePinger tests /healthz without Postgres, including the failure path,
+// which is what really matters in a health check.
 type fakePinger struct{ err error }
 
 func (f *fakePinger) PingContext(_ context.Context) error { return f.err }
 
-// --- Montagem do servidor de teste --------------------------------------
-
-// testServer é o alvo dos testes: rotas reais, middleware real, use cases
-// reais, fakes só nas portas.
 type testServer struct {
 	router       *gin.Engine
 	accounts     *fakeAccounts
 	transactions *fakeTransactions
 	categories   *fakeCategories
-	dispatcher   *fakeDispatcher
 	provider     *fakeProvider
 	pinger       *fakePinger
 }
@@ -266,7 +278,6 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		accounts:     newFakeAccounts(),
 		transactions: newFakeTransactions(),
 		categories:   newFakeCategories(),
-		dispatcher:   &fakeDispatcher{},
 		provider:     &fakeProvider{name: "mock"},
 		pinger:       &fakePinger{},
 	}
@@ -274,8 +285,6 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		option(server)
 	}
 
-	// Logger descartado: o handler loga o 500 com o erro completo, e isso
-	// poluiria a saída do teste sem provar nada.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	router := gin.New()
@@ -292,8 +301,8 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		),
 		ginhandler.NewTransactionHandler(
 			application.NewRecordTransactionUseCase(server.transactions, server.accounts),
-			application.NewCategorizeTransactionUseCase(server.transactions, server.categories, server.dispatcher),
-			application.NewImportFromProviderUseCase(server.transactions, server.accounts, server.provider, server.dispatcher),
+			application.NewCategorizeTransactionUseCase(server.transactions, server.categories),
+			application.NewImportFromProviderUseCase(server.transactions, server.accounts, server.provider, passThroughUnitOfWork{}),
 			application.NewListTransactionsUseCase(server.transactions),
 			application.NewViewTransactionUseCase(server.transactions),
 			logger,
@@ -313,31 +322,25 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 	return server
 }
 
-// stubAuthenticate substitui o middleware do BC Identity por um que lê o
-// usuário direto do header X-User-Id.
-//
-// Por que stub e não o middleware real: estes testes são do Financial
-// Tracking, e o que eles precisam saber sobre autenticação é apenas
-// "resolvido ou não". Usar o middleware real obrigaria cada teste daqui a
-// forjar um token do Google — acoplando os testes de conta e transação ao
-// mecanismo de credencial, que é assunto de outro bounded context e tem
-// testes próprios (identity/adapter/ginmiddleware).
-//
-// O contrato que este stub imita é o mesmo do real: injeta um uuid no
-// context da request, ou responde 401.
+// stubAuthenticate replaces the Identity middleware with one that reads the
+// user straight from the X-User-Id header. These Financial Tracking tests only
+// need "resolved or not"; the real middleware would force every test to forge
+// a Google token, coupling them to a credential mechanism owned by another
+// bounded context. The stub keeps the real contract: it puts a uuid in the
+// request context, or answers 401.
 func stubAuthenticate() gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
 		raw := ginContext.GetHeader("X-User-Id")
 		if raw == "" {
 			ginContext.AbortWithStatusJSON(http.StatusUnauthorized, httperror.Body{
-				Error: httperror.Detail{Code: "invalid_token", Message: "credencial ausente"},
+				Error: httperror.Detail{Code: "invalid_token", Message: "missing credential"},
 			})
 			return
 		}
 		userID, err := uuid.Parse(raw)
 		if err != nil {
 			ginContext.AbortWithStatusJSON(http.StatusUnauthorized, httperror.Body{
-				Error: httperror.Detail{Code: "invalid_token", Message: "credencial mal formada"},
+				Error: httperror.Detail{Code: "invalid_token", Message: "malformed credential"},
 			})
 			return
 		}
@@ -348,16 +351,15 @@ func stubAuthenticate() gin.HandlerFunc {
 	}
 }
 
-// request dispara uma requisição contra o router em memória (sem socket) e
-// devolve a resposta gravada.
+// request sends a request to the in-memory router, without a socket. A raw
+// string body is sent as is, so tests can send malformed JSON that
+// json.Marshal would never produce.
 func (s *testServer) request(t *testing.T, method string, path string, userID string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var payload io.Reader
 	if body != nil {
 		if raw, ok := body.(string); ok {
-			// String crua permite testar JSON malformado, que um
-			// json.Marshal jamais produziria.
 			payload = bytes.NewBufferString(raw)
 		} else {
 			encoded, err := json.Marshal(body)
@@ -377,30 +379,26 @@ func (s *testServer) request(t *testing.T, method string, path string, userID st
 	return recorder
 }
 
-// decode lê o corpo JSON da resposta.
 func decode(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body), "corpo não é JSON: %s", recorder.Body.String())
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body), "body is not JSON: %s", recorder.Body.String())
 	return body
 }
 
-// errorCode extrai o código estável do corpo de erro — é o contrato que o
-// cliente consome, e por isso o que os testes afirmam (não a mensagem, que
-// é pra humano e pode mudar).
+// errorCode extracts the stable code from the error body: it is the contract
+// the client consumes, so tests assert it instead of the human message.
 func errorCode(t *testing.T, recorder *httptest.ResponseRecorder) string {
 	t.Helper()
 
 	body := decode(t, recorder)
 	detail, ok := body["error"].(map[string]any)
-	require.True(t, ok, "resposta sem objeto error: %s", recorder.Body.String())
+	require.True(t, ok, "response without an error object: %s", recorder.Body.String())
 	code, ok := detail["code"].(string)
-	require.True(t, ok, "erro sem code: %s", recorder.Body.String())
+	require.True(t, ok, "error without a code: %s", recorder.Body.String())
 	return code
 }
-
-// --- Builders de aggregate ----------------------------------------------
 
 func mustUserID(t *testing.T, raw uuid.UUID) shared.UserID {
 	t.Helper()
@@ -432,13 +430,13 @@ func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string) *
 	return created
 }
 
-// newTransactionAt cria lançamento com instante controlado, pra os testes de
-// ordem e período não dependerem do relógio.
+// newTransactionAt pins the instant so ordering and period tests do not
+// depend on the clock.
 func newTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.AccountID, amount int64, occurredAt time.Time) *transaction.Transaction {
 	t.Helper()
 	money, err := shared.NewMoney(amount, mustCurrency(t, "BRL"))
 	require.NoError(t, err)
-	created, err := transaction.NewManual(mustUserID(t, ownerID), accountID, money, occurredAt, "Mercado")
+	created, err := transaction.NewManual(mustUserID(t, ownerID), accountID, money, occurredAt, "Groceries")
 	require.NoError(t, err)
 	return created
 }
@@ -454,7 +452,7 @@ func newTransactionFor(t *testing.T, ownerID uuid.UUID, accountID account.Accoun
 	t.Helper()
 	money, err := shared.NewMoney(-4550, mustCurrency(t, "BRL"))
 	require.NoError(t, err)
-	created, err := transaction.NewManual(mustUserID(t, ownerID), accountID, money, time.Now().Add(-time.Hour), "Padaria")
+	created, err := transaction.NewManual(mustUserID(t, ownerID), accountID, money, time.Now().Add(-time.Hour), "Bakery")
 	require.NoError(t, err)
 	return created
 }

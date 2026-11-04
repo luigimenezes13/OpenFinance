@@ -1,12 +1,9 @@
-// Package application_test testa os use cases pela API pública (package
-// externo _test, convenção do spec §8). Aqui vivem os FAKES das portas e os
-// builders de aggregate compartilhados por todos os _test.go do package.
+// Package application_test tests the use cases through their public API and
+// holds the port fakes and aggregate builders shared by every test file.
 //
-// Por que fakes escritos à mão e não uma lib de mock: as portas do domínio
-// são interfaces pequenas (2 métodos), e um fake com map em memória testa a
-// ORQUESTRAÇÃO de verdade (salvou? achou? qual evento saiu?) em vez de
-// testar expectativas de mock. Mock que verifica "Save foi chamado 1 vez"
-// testa o dublê, não o comportamento.
+// The fakes are hand written in-memory maps instead of mocks: the ports are
+// small interfaces, and a map-backed fake tests the real orchestration (was it
+// saved? found? which event was recorded?) instead of mock expectations.
 package application_test
 
 import (
@@ -27,15 +24,30 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
-// errInfra simula falha de infraestrutura (banco fora, rede caiu). O use
-// case não deve traduzir nem embrulhar: erro de fronteira sobe como veio.
+// errInfra simulates an infrastructure failure. The use case must neither
+// translate nor wrap it: a boundary error goes up as it came.
 var errInfra = errors.New("fake: infrastructure failure")
 
-// --- Fakes das portas de persistência -------------------------------------
+// recordedEvents mirrors what the real repositories do inside Save: the
+// aggregate's pending events go to the outbox and are cleared afterwards.
+type recordedEvents struct {
+	savedEvents []events.Event
+}
 
-// fakeAccounts implementa account.Repository com um map. Os campos *Err
-// injetam falha pra exercitar os caminhos de erro.
+func (r *recordedEvents) record(pending []events.Event) {
+	r.savedEvents = append(r.savedEvents, pending...)
+}
+
+func (r *recordedEvents) savedEventNames() []string {
+	names := make([]string, 0, len(r.savedEvents))
+	for _, saved := range r.savedEvents {
+		names = append(names, saved.EventName())
+	}
+	return names
+}
+
 type fakeAccounts struct {
+	recordedEvents
 	stored  map[string]*account.Account
 	saved   []*account.Account
 	saveErr error
@@ -56,6 +68,8 @@ func (f *fakeAccounts) Save(_ context.Context, target *account.Account) error {
 	}
 	f.stored[target.ID().String()] = target
 	f.saved = append(f.saved, target)
+	f.record(target.Events())
+	target.ClearEvents()
 	return nil
 }
 
@@ -65,15 +79,13 @@ func (f *fakeAccounts) FindByID(_ context.Context, id account.AccountID) (*accou
 	}
 	found, ok := f.stored[id.String()]
 	if !ok {
-		// Mesmo contrato do repository real: ausência é ErrNotFound do
-		// aggregate, não erro de driver.
 		return nil, account.ErrNotFound
 	}
 	return found, nil
 }
 
-// listByUser filtra e ordena em memória, do jeito que o repositório real
-// ordena (nome), pra o teste do use case exercitar a projeção de verdade.
+// ListByUser sorts by name, like the real repository, so the use case test
+// exercises the real projection.
 func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*account.Account, error) {
 	if f.findErr != nil {
 		return nil, f.findErr
@@ -92,8 +104,8 @@ func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*a
 	return found, nil
 }
 
-// fakeTransactions implementa transaction.Repository.
 type fakeTransactions struct {
+	recordedEvents
 	stored  map[string]*transaction.Transaction
 	saved   []*transaction.Transaction
 	saveErr error
@@ -114,6 +126,8 @@ func (f *fakeTransactions) Save(_ context.Context, target *transaction.Transacti
 	}
 	f.stored[target.ID().String()] = target
 	f.saved = append(f.saved, target)
+	f.record(target.Events())
+	target.ClearEvents()
 	return nil
 }
 
@@ -128,8 +142,9 @@ func (f *fakeTransactions) FindByID(_ context.Context, id transaction.Transactio
 	return found, nil
 }
 
-// List aplica os filtros do critério em memória: é o que permite o teste do
-// use case verificar que ele traduziu o input em Criteria corretamente.
+// List applies the criteria filters in memory and returns the newest first,
+// like the real repository, so the use case test proves it translated the
+// input into Criteria correctly.
 func (f *fakeTransactions) List(_ context.Context, criteria transaction.Criteria) ([]*transaction.Transaction, error) {
 	if f.findErr != nil {
 		return nil, f.findErr
@@ -143,7 +158,6 @@ func (f *fakeTransactions) List(_ context.Context, criteria transaction.Criteria
 		found = append(found, existing)
 	}
 
-	// Extrato do recente pro antigo, igual ao repositório real.
 	sort.Slice(found, func(first, second int) bool {
 		return found[first].OccurredAt().After(found[second].OccurredAt())
 	})
@@ -159,7 +173,6 @@ func (f *fakeTransactions) List(_ context.Context, criteria transaction.Criteria
 	return found[page.Offset():end], nil
 }
 
-// matches aplica dono e filtros opcionais.
 func (f *fakeTransactions) matches(candidate *transaction.Transaction, criteria transaction.Criteria) bool {
 	owner := candidate.UserID()
 	if !owner.Equals(criteria.UserID()) {
@@ -185,7 +198,6 @@ func (f *fakeTransactions) matches(candidate *transaction.Transaction, criteria 
 	return true
 }
 
-// fakeCategories implementa category.Repository.
 type fakeCategories struct {
 	stored  map[string]*category.Category
 	saved   []*category.Category
@@ -239,50 +251,52 @@ func (f *fakeCategories) ListByUser(_ context.Context, userID shared.UserID) ([]
 	return found, nil
 }
 
-// --- Fake do dispatcher ---------------------------------------------------
-
-// fakeDispatcher guarda o que foi despachado — é assim que o teste verifica
-// que o use case publicou o fato certo DEPOIS de persistir.
-type fakeDispatcher struct {
-	dispatched  []events.Event
-	dispatchErr error
+// callOrder records the order of calls across several fakes, so a test can
+// prove the provider is queried before the unit of work opens. A nil
+// callOrder records nothing.
+type callOrder struct {
+	calls []string
 }
 
-func (f *fakeDispatcher) Register(_ string, _ events.Handler) {}
-
-func (f *fakeDispatcher) Dispatch(_ context.Context, dispatched ...events.Event) error {
-	if f.dispatchErr != nil {
-		return f.dispatchErr
+func (c *callOrder) record(call string) {
+	if c == nil {
+		return
 	}
-	f.dispatched = append(f.dispatched, dispatched...)
-	return nil
+	c.calls = append(c.calls, call)
 }
 
-// eventNames devolve os nomes dos eventos despachados, na ordem.
-func (f *fakeDispatcher) eventNames() []string {
-	names := make([]string, 0, len(f.dispatched))
-	for _, dispatched := range f.dispatched {
-		names = append(names, dispatched.EventName())
+// fakeUnitOfWork runs the work in place and counts the runs. When err is set
+// it returns that error without running the work, like a unit that fails to
+// open or to commit.
+type fakeUnitOfWork struct {
+	runs  int
+	err   error
+	order *callOrder
+}
+
+func (f *fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
+	f.runs++
+	f.order.record("unitOfWork.Run")
+	if f.err != nil {
+		return f.err
 	}
-	return names
+	return work(ctx)
 }
 
-// --- Fake do provider Open Finance ---------------------------------------
-
-// fakeProvider implementa openfinance.Provider e registra COM O QUE foi
-// chamado — é como o teste prova que o use case usou a referência do VO
-// Source, e não algo vindo do input.
+// fakeProvider records the arguments it was called with: that is how a test
+// proves the use case used the reference from the Source value object and
+// not something from the input. A nil balance answers a zero BRL balance as
+// of now, so tests that do not care about the balance skip configuring it.
 type fakeProvider struct {
 	name         string
 	transactions []openfinance.ProviderTransaction
 	fetchErr     error
 
-	// Saldo devolvido pelo FetchBalance. Zero value = saldo zerado em BRL
-	// datado de agora (montado no método), pra os testes que não se importam
-	// com saldo não precisarem configurá-lo.
 	balance         *openfinance.ProviderBalance
 	balanceErr      error
 	balanceRequests int
+
+	order *callOrder
 
 	calledAccountID string
 	calledSince     time.Time
@@ -293,6 +307,7 @@ func (f *fakeProvider) Name() string {
 }
 
 func (f *fakeProvider) FetchTransactions(_ context.Context, providerAccountID string, since time.Time) ([]openfinance.ProviderTransaction, error) {
+	f.order.record("provider.FetchTransactions")
 	f.calledAccountID = providerAccountID
 	f.calledSince = since
 	if f.fetchErr != nil {
@@ -302,6 +317,7 @@ func (f *fakeProvider) FetchTransactions(_ context.Context, providerAccountID st
 }
 
 func (f *fakeProvider) FetchBalance(_ context.Context, providerAccountID string) (openfinance.ProviderBalance, error) {
+	f.order.record("provider.FetchBalance")
 	f.balanceRequests++
 	f.calledAccountID = providerAccountID
 	if f.balanceErr != nil {
@@ -312,8 +328,6 @@ func (f *fakeProvider) FetchBalance(_ context.Context, providerAccountID string)
 	}
 	return openfinance.ProviderBalance{AmountInCents: 0, CurrencyCode: "BRL", AsOf: time.Now()}, nil
 }
-
-// --- Builders de aggregate ------------------------------------------------
 
 func mustUserID(t *testing.T, raw uuid.UUID) shared.UserID {
 	t.Helper()
@@ -336,7 +350,6 @@ func mustMoney(t *testing.T, amount int64, code string) shared.Money {
 	return money
 }
 
-// newManualAccount cria uma conta manual pronta pra ser "achada" pelo fake.
 func newManualAccount(t *testing.T, ownerID uuid.UUID, currencyCode string) *account.Account {
 	t.Helper()
 	kind, err := account.NewKind("checking")
@@ -347,8 +360,6 @@ func newManualAccount(t *testing.T, ownerID uuid.UUID, currencyCode string) *acc
 	return manual
 }
 
-// newConnectedAccount cria uma conta com origem Open Finance — a única que
-// o use case de importação aceita.
 func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string, providerAccountID string, currencyCode string) *account.Account {
 	t.Helper()
 	kind, err := account.NewKind("checking")
@@ -362,7 +373,6 @@ func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string, p
 	return connected
 }
 
-// newManualTransaction cria um lançamento manual já "persistido" no fake.
 func newManualTransaction(t *testing.T, ownerID uuid.UUID, accountID account.AccountID, amount int64, currencyCode string) *transaction.Transaction {
 	t.Helper()
 	recorded, err := transaction.NewManual(
@@ -370,14 +380,14 @@ func newManualTransaction(t *testing.T, ownerID uuid.UUID, accountID account.Acc
 		accountID,
 		mustMoney(t, amount, currencyCode),
 		time.Now().Add(-time.Hour),
-		"Mercado",
+		"Groceries",
 	)
 	require.NoError(t, err)
 	return recorded
 }
 
-// newManualTransactionAt cria lançamento com instante controlado, pra os
-// testes de ordem e período não dependerem do relógio.
+// newManualTransactionAt pins the instant so ordering and period tests do
+// not depend on the clock.
 func newManualTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.AccountID, amount int64, occurredAt time.Time) *transaction.Transaction {
 	t.Helper()
 	recorded, err := transaction.NewManual(
@@ -385,7 +395,7 @@ func newManualTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.A
 		accountID,
 		mustMoney(t, amount, "BRL"),
 		occurredAt,
-		"Mercado",
+		"Groceries",
 	)
 	require.NoError(t, err)
 	return recorded
