@@ -16,6 +16,7 @@ import (
 	entuser "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo/ent/user"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
+	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
 // NewClient monta o client do Ent deste BC sobre um *sql.DB já configurado.
@@ -31,23 +32,27 @@ func NewClient(database *sql.DB) *ent.Client {
 // UserRepository implementa identity.Repository.
 type UserRepository struct {
 	client *ent.Client
+	writer *outbox.AggregateWriter
 }
 
 // Checagem de contrato em tempo de compilação.
 var _ identity.Repository = (*UserRepository)(nil)
 
-// NewUserRepository injeta o client por construtor.
-func NewUserRepository(client *ent.Client) *UserRepository {
-	return &UserRepository{client: client}
+func NewUserRepository(client *ent.Client, writer *outbox.AggregateWriter) *UserRepository {
+	return &UserRepository{client: client, writer: writer}
 }
 
-// Save persiste o usuário (upsert por id). UpdateNewValues ignora os campos
+func (r *UserRepository) Save(ctx context.Context, user *identity.User) error {
+	return r.writer.Write(ctx, user, func(ctx context.Context) error {
+		return r.upsert(ctx, user.Snapshot())
+	})
+}
+
+// upsert grava o usuário por id. UpdateNewValues ignora os campos
 // Immutable do schema — id, a âncora (provedor + subject), registered_at e
 // created_at. Só perfil e updated_at mudam num login seguinte, que é
 // exatamente o que SyncProfile permite mudar.
-func (r *UserRepository) Save(ctx context.Context, user *identity.User) error {
-	snapshot := user.Snapshot()
-
+func (r *UserRepository) upsert(ctx context.Context, snapshot identity.UserSnapshot) error {
 	err := r.client.User.Create().
 		SetID(snapshot.ID).
 		SetEmail(snapshot.Email).

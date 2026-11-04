@@ -91,13 +91,19 @@ func run(logger *slog.Logger) error {
 	}()
 
 	// --- Adapters concretos (a única parte do sistema que sabe o "quem") ---
-	accounts := entrepo.NewAccountRepository(entClient)
-	transactions := entrepo.NewTransactionRepository(entClient)
-	categories := entrepo.NewCategoryRepository(entClient)
+	unitOfWork := db.NewUnitOfWork(database)
+	writer, err := newAggregateWriter(database, unitOfWork)
+	if err != nil {
+		return err
+	}
+
+	accounts := entrepo.NewAccountRepository(entClient, writer)
+	transactions := entrepo.NewTransactionRepository(entClient, writer)
+	categories := entrepo.NewCategoryRepository(entClient, unitOfWork)
 	provider := mockprovider.New()
 	dispatcher := platformevents.NewInProcessDispatcher(logger)
 
-	users := identityentrepo.NewUserRepository(identityClient)
+	users := identityentrepo.NewUserRepository(identityClient, writer)
 	// Qual verificador entra é decidido em tempo de COMPILAÇÃO (ver
 	// verifier_google.go e verifier_devauth.go): o binário de produção não
 	// contém o de desenvolvimento.

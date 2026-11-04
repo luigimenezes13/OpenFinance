@@ -15,7 +15,7 @@ FT_ENT_DIR      := internal/financialtracking/adapter/entrepo/ent
 ID_MIGRATE_MAIN := internal/identity/adapter/entrepo/ent/migrate/main.go
 ID_ENT_DIR      := internal/identity/adapter/entrepo/ent
 
-.PHONY: run run-devauth test test-integration bench-persistence generate migrate-diff migrate-diff-identity migrate-apply db-up db-databases db-down db-reset fmt vet check
+.PHONY: run run-devauth test test-integration bench-persistence generate migrate-diff migrate-diff-identity migrate-river-get migrate-apply db-up db-databases db-down db-reset fmt vet check
 
 # Sobe a API localmente contra o Postgres do compose. Exige um
 # GOOGLE_CLIENT_ID de verdade e um ID token do Google nas requisições.
@@ -72,6 +72,14 @@ migrate-diff: db-up
 migrate-diff-identity: db-up
 	@test -n "$(name)" || (echo "uso: make migrate-diff-identity name=<nome_da_mudanca>"; exit 1)
 	ATLAS_DEV_DATABASE_URL="$(ATLAS_DEV_URL)" go run -mod=mod $(ID_MIGRATE_MAIN) $(name)
+
+# Extrai o SQL das migrations do River para o Atlas aplicar, em vez de deixar o
+# River migrar sozinho no boot. Rodar ao subir a versão do River no go.mod, com
+# a MESMA versão, e gravar só as migrations novas num arquivo novo.
+# Uso: make migrate-river-get > /tmp/river.sql
+RIVER_VERSION = $(shell go list -m -f '{{.Version}}' github.com/riverqueue/river)
+migrate-river-get:
+	@go run github.com/riverqueue/river/cmd/river@$(RIVER_VERSION) migrate-get --all --exclude-version 1 --up
 
 # DEV: derruba o schema do banco de desenvolvimento e reaplica TODAS as
 # migrations. Destrutivo de propósito e só para desenvolvimento — em

@@ -19,9 +19,7 @@
 package entrepo
 
 import (
-	"context"
 	"database/sql"
-	"fmt"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
@@ -35,38 +33,4 @@ import (
 // adapter multiplicaria conexões sem necessidade.
 func NewClient(database *sql.DB) *ent.Client {
 	return ent.NewClient(ent.Driver(db.NewAmbientDriver(database)))
-}
-
-// withTx roda `work` dentro de uma transação do Ent: commit no sucesso,
-// rollback em erro OU panic.
-//
-// Usado onde a escrita abrange mais de uma tabela DENTRO do mesmo aggregate
-// (categoria + suas regras). Não existe helper abrangendo dois aggregates:
-// isso seria furar a fronteira de consistência.
-func withTx(ctx context.Context, client *ent.Client, work func(tx *ent.Tx) error) error {
-	transaction, err := client.Tx(ctx)
-	if err != nil {
-		return fmt.Errorf("entrepo: falha abrindo transação: %w", err)
-	}
-
-	// O panic é re-lançado depois do rollback: engolir panic aqui
-	// transformaria bug de programação em erro silencioso.
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			_ = transaction.Rollback()
-			panic(recovered)
-		}
-	}()
-
-	if err := work(transaction); err != nil {
-		if rollbackErr := transaction.Rollback(); rollbackErr != nil {
-			return fmt.Errorf("entrepo: %w (rollback falhou: %v)", err, rollbackErr)
-		}
-		return err
-	}
-
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("entrepo: falha no commit: %w", err)
-	}
-	return nil
 }
