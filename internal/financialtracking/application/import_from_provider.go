@@ -11,7 +11,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/openfinance"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
-	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // ImportFromProviderInput é a entrada da importação. A conta é a LOCAL (a
@@ -45,9 +45,9 @@ type ImportFromProviderOutput struct {
 }
 
 // ImportFromProviderUseCase importa transações de uma conta conectada.
-// Quatro dependências: transações (grava), contas (lê — ownership, moeda e
-// referência do provider), a porta Provider (lê o mundo externo) e o
-// Dispatcher (NewFromProvider emite Imported).
+// Quatro dependências: transações (grava), contas (lê e grava o saldo), a
+// porta Provider (lê o mundo externo) e o UnitOfWork, que torna a gravação
+// das N transações e do saldo uma coisa só.
 //
 // Este é o use case que materializa a ACL: ele recebe ProviderTransaction
 // (DTO de fronteira) e produz aggregate Transaction. Nada de Pluggy entra
@@ -56,34 +56,33 @@ type ImportFromProviderUseCase struct {
 	transactions transaction.Repository
 	accounts     account.Repository
 	provider     openfinance.Provider
-	dispatcher   events.Dispatcher
+	unitOfWork   kernel.UnitOfWork
 }
 
-// NewImportFromProviderUseCase injeta as dependências por construtor.
 func NewImportFromProviderUseCase(
 	transactions transaction.Repository,
 	accounts account.Repository,
 	provider openfinance.Provider,
-	dispatcher events.Dispatcher,
+	unitOfWork kernel.UnitOfWork,
 ) *ImportFromProviderUseCase {
 	return &ImportFromProviderUseCase{
 		transactions: transactions,
 		accounts:     accounts,
 		provider:     provider,
-		dispatcher:   dispatcher,
+		unitOfWork:   unitOfWork,
 	}
 }
 
-// Execute orquestra a importação: resolve a conta local, descobre a
-// contraparte no provider, busca as transações e transforma cada uma em
-// aggregate.
+// Execute busca tudo no provider ANTES de abrir a transação do banco (rede
+// dentro de transação seguraria lock pelo tempo da chamada externa) e depois
+// grava as transações importadas e o saldo numa unidade só: falha no meio
+// não deixa metade da importação salva.
 //
 // LIMITE CONHECIDO do v1 (spec: idempotência é decisão do PR4): rodar a
 // importação duas vezes na mesma janela IMPORTA DE NOVO. Deduplicar exige
 // consultar por ExternalRef — método que a porta transaction.Repository
 // ainda não tem, e que a doc §5.5 mostra ser mais complicado que "compara o
-// id" (o id da Pluggy muda quando a transação é reconciliada). Fica
-// explícito aqui em vez de escondido num TODO.
+// id" (o id da Pluggy muda quando a transação é reconciliada).
 func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFromProviderInput) (ImportFromProviderOutput, error) {
 	userID, err := shared.NewUserID(input.UserID)
 	if err != nil {
@@ -112,24 +111,26 @@ func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFro
 	if err != nil {
 		return ImportFromProviderOutput{}, err
 	}
+	providerBalance, err := u.provider.FetchBalance(ctx, connection.providerAccountID)
+	if err != nil {
+		return ImportFromProviderOutput{}, err
+	}
 
 	balance := targetAccount.Balance()
 	currency := balance.Currency()
 
-	transactionIDs := make([]string, 0, len(providerTransactions))
-	for _, providerTransaction := range providerTransactions {
-		imported, err := u.importOne(ctx, userID, accountID, currency, connection.provider, providerTransaction)
-		if err != nil {
-			return ImportFromProviderOutput{}, err
-		}
-		transactionIDs = append(transactionIDs, imported.ID().String())
+	imported, err := toImportedTransactions(userID, accountID, currency, connection.provider, providerTransactions)
+	if err != nil {
+		return ImportFromProviderOutput{}, err
+	}
+	applied, err := applyProviderBalance(targetAccount, currency, providerBalance)
+	if err != nil {
+		return ImportFromProviderOutput{}, err
 	}
 
-	// O saldo é aplicado DEPOIS das transações: se a importação abortar no
-	// meio, o saldo antigo continua valendo em vez de anunciar um número que
-	// não corresponde aos lançamentos que entraram. Na próxima importação os
-	// dois se alinham.
-	providerBalance, applied, err := u.applyProviderBalance(ctx, targetAccount, currency, connection.providerAccountID)
+	err = u.unitOfWork.Run(ctx, func(ctx context.Context) error {
+		return u.persist(ctx, imported, targetAccount, applied)
+	})
 	if err != nil {
 		return ImportFromProviderOutput{}, err
 	}
@@ -137,68 +138,74 @@ func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFro
 	return ImportFromProviderOutput{
 		AccountID:      accountID.String(),
 		Provider:       connection.provider,
-		TransactionIDs: transactionIDs,
+		TransactionIDs: transactionIDsOf(imported),
 		Balance:        providerBalance.AmountInCents,
 		Currency:       providerBalance.CurrencyCode,
 		BalanceApplied: applied,
 	}, nil
 }
 
-// applyProviderBalance busca o saldo no provedor e o registra na conta.
+func (u *ImportFromProviderUseCase) persist(
+	ctx context.Context,
+	imported []*transaction.Transaction,
+	targetAccount *account.Account,
+	balanceApplied bool,
+) error {
+	for _, importedTransaction := range imported {
+		if err := u.transactions.Save(ctx, importedTransaction); err != nil {
+			return err
+		}
+	}
+	if !balanceApplied {
+		return nil
+	}
+	return u.accounts.Save(ctx, targetAccount)
+}
+
+func transactionIDsOf(imported []*transaction.Transaction) []string {
+	ids := make([]string, 0, len(imported))
+	for _, importedTransaction := range imported {
+		ids = append(ids, importedTransaction.ID().String())
+	}
+	return ids
+}
+
+// applyProviderBalance registra na conta o saldo informado pelo provedor.
 //
 // Este é o ÚNICO lugar do sistema que muda saldo de conta — nem o lançamento
-// manual, nem a categorização mexem nele (decisão de 2026-08-27). A razão: o
-// banco é a autoridade sobre quanto existe na conta, e derivar saldo dos
-// lançamentos digitados produziria um número que discorda do extrato
-// bancário, com o usuário confiando no errado.
-func (u *ImportFromProviderUseCase) applyProviderBalance(
-	ctx context.Context,
+// manual, nem a categorização mexem nele (decisão de 2026-08-27): o banco é a
+// autoridade sobre quanto existe na conta, e derivar saldo dos lançamentos
+// digitados produziria um número que discorda do extrato bancário.
+//
+// Saldo mais antigo que o registrado é IGNORADO, não é erro: webhooks e syncs
+// chegam fora de ordem, e o aggregate recusa o retrocesso (ErrStaleBalance,
+// decisão de 2026-07-04). O retorno false diz que a conta não mudou.
+func applyProviderBalance(
 	targetAccount *account.Account,
 	currency shared.Currency,
-	providerAccountID string,
-) (openfinance.ProviderBalance, bool, error) {
-	providerBalance, err := u.provider.FetchBalance(ctx, providerAccountID)
-	if err != nil {
-		return openfinance.ProviderBalance{}, false, err
-	}
-
-	// Moeda divergente é dado corrompido na fronteira, igual às transações.
+	providerBalance openfinance.ProviderBalance,
+) (bool, error) {
 	if providerBalance.CurrencyCode != currency.Code() {
-		return openfinance.ProviderBalance{}, false, account.ErrCurrencyMismatch
+		return false, account.ErrCurrencyMismatch
 	}
 
 	money, err := shared.NewMoney(providerBalance.AmountInCents, currency)
 	if err != nil {
-		return openfinance.ProviderBalance{}, false, err
+		return false, err
 	}
 	updated, err := account.NewBalance(money, providerBalance.AsOf)
 	if err != nil {
-		return openfinance.ProviderBalance{}, false, err
+		return false, err
 	}
 
-	// Saldo mais antigo que o registrado é IGNORADO, não é erro: webhooks e
-	// syncs chegam fora de ordem, e o aggregate recusa o retrocesso
-	// (ErrStaleBalance, decisão de 2026-07-04). Quem decide o que fazer com
-	// a recusa é o use case — e o que faz sentido é seguir com o saldo mais
-	// recente que já temos.
-	if err := targetAccount.UpdateBalance(updated); err != nil {
-		if errors.Is(err, account.ErrStaleBalance) {
-			return providerBalance, false, nil
-		}
-		return openfinance.ProviderBalance{}, false, err
+	err = targetAccount.UpdateBalance(updated)
+	if errors.Is(err, account.ErrStaleBalance) {
+		return false, nil
 	}
-
-	if err := u.accounts.Save(ctx, targetAccount); err != nil {
-		return openfinance.ProviderBalance{}, false, err
+	if err != nil {
+		return false, err
 	}
-
-	// UpdateBalance emitiu AccountBalanceUpdated: Save → Dispatch →
-	// ClearEvents, a mesma ordem de sempre.
-	if err := dispatchAndClear(ctx, u.dispatcher, targetAccount); err != nil {
-		return openfinance.ProviderBalance{}, false, err
-	}
-
-	return providerBalance, true, nil
+	return true, nil
 }
 
 // connection é o par (provider, id da conta lá) extraído do VO Source.
@@ -232,24 +239,37 @@ func (u *ImportFromProviderUseCase) resolveConnection(targetAccount *account.Acc
 	return connection{provider: providerName, providerAccountID: providerAccountID}, nil
 }
 
-// importOne transforma UM ProviderTransaction em aggregate persistido, com
-// os eventos já publicados. Método separado pra manter um nível de
-// indentação no laço de Execute — e porque "importar uma transação" é um
-// passo com nome próprio.
-//
-// Falha aqui aborta a importação inteira (v1): mais simples e determinístico
-// que importar metade. Tolerância por item (importa o que dá, relata o que
-// falhou) é decisão do PR4, quando existir sync recorrente.
-func (u *ImportFromProviderUseCase) importOne(
-	ctx context.Context,
+// toImportedTransactions transforma cada ProviderTransaction em aggregate,
+// sem gravar nada. Um item inválido aborta a importação inteira (v1): mais
+// simples e determinístico que importar metade. Tolerância por item é decisão
+// do PR4, quando existir sync recorrente.
+func toImportedTransactions(
+	userID shared.UserID,
+	accountID account.AccountID,
+	currency shared.Currency,
+	providerName string,
+	providerTransactions []openfinance.ProviderTransaction,
+) ([]*transaction.Transaction, error) {
+	imported := make([]*transaction.Transaction, 0, len(providerTransactions))
+	for _, providerTransaction := range providerTransactions {
+		converted, err := toImportedTransaction(userID, accountID, currency, providerName, providerTransaction)
+		if err != nil {
+			return nil, err
+		}
+		imported = append(imported, converted)
+	}
+	return imported, nil
+}
+
+// toImportedTransaction recusa moeda divergente: é dado corrompido na
+// fronteira, não escolha do usuário — conta em BRL não recebe transação em USD.
+func toImportedTransaction(
 	userID shared.UserID,
 	accountID account.AccountID,
 	currency shared.Currency,
 	providerName string,
 	providerTransaction openfinance.ProviderTransaction,
 ) (*transaction.Transaction, error) {
-	// Moeda divergente é dado corrompido na fronteira, não escolha do
-	// usuário: conta em BRL não recebe transação em USD.
 	if providerTransaction.CurrencyCode != currency.Code() {
 		return nil, account.ErrCurrencyMismatch
 	}
@@ -264,7 +284,7 @@ func (u *ImportFromProviderUseCase) importOne(
 		return nil, err
 	}
 
-	imported, err := transaction.NewFromProvider(
+	return transaction.NewFromProvider(
 		userID,
 		accountID,
 		money,
@@ -272,17 +292,4 @@ func (u *ImportFromProviderUseCase) importOne(
 		providerTransaction.Description,
 		ref,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := u.transactions.Save(ctx, imported); err != nil {
-		return nil, err
-	}
-
-	if err := dispatchAndClear(ctx, u.dispatcher, imported); err != nil {
-		return nil, err
-	}
-
-	return imported, nil
 }

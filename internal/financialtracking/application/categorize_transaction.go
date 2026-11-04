@@ -9,7 +9,6 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
-	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
 // CategorizeTransactionInput é a entrada da categorização. AssignedBy chega
@@ -31,29 +30,20 @@ type CategorizeTransactionOutput struct {
 }
 
 // CategorizeTransactionUseCase atribui (ou troca) a categoria de uma
-// transação. Três dependências: a transação (lê e grava), a categoria (só
-// LÊ — pra garantir que existe e é do usuário) e o Dispatcher, esse sim
-// necessário: Categorize emite Categorized, que o BC de Budgets consome no
-// PR5.
+// transação. Duas dependências: a transação (lê e grava) e a categoria (só
+// LÊ — pra garantir que existe e é do usuário). O Categorized que o root
+// emite sai pelo Save do repositório, na mesma transação da escrita.
 type CategorizeTransactionUseCase struct {
 	transactions transaction.Repository
 	categories   category.Repository
-	dispatcher   events.Dispatcher
 }
 
-// NewCategorizeTransactionUseCase injeta as dependências por construtor.
-func NewCategorizeTransactionUseCase(transactions transaction.Repository, categories category.Repository, dispatcher events.Dispatcher) *CategorizeTransactionUseCase {
-	return &CategorizeTransactionUseCase{
-		transactions: transactions,
-		categories:   categories,
-		dispatcher:   dispatcher,
-	}
+func NewCategorizeTransactionUseCase(transactions transaction.Repository, categories category.Repository) *CategorizeTransactionUseCase {
+	return &CategorizeTransactionUseCase{transactions: transactions, categories: categories}
 }
 
 // Execute orquestra a categorização: resolve identidades, carrega os dois
-// aggregates pra checar dono, delega a mutação ao root e só então publica
-// os eventos — a ordem Save → Dispatch → ClearEvents é a regra do spec §6
-// (evento só sai depois do fato estar persistido).
+// aggregates pra checar dono e delega a mutação ao root.
 func (u *CategorizeTransactionUseCase) Execute(ctx context.Context, input CategorizeTransactionInput) (CategorizeTransactionOutput, error) {
 	userID, err := shared.NewUserID(input.UserID)
 	if err != nil {
@@ -104,36 +94,7 @@ func (u *CategorizeTransactionUseCase) Execute(ctx context.Context, input Catego
 		return CategorizeTransactionOutput{}, err
 	}
 
-	if err := dispatchAndClear(ctx, u.dispatcher, target); err != nil {
-		return CategorizeTransactionOutput{}, err
-	}
-
 	return toCategorizeTransactionOutput(target)
-}
-
-// recorder é o contrato mínimo que um aggregate com eventos satisfaz —
-// exatamente os três métodos que o kernel.EventRecorder promove. Declarar a
-// interface AQUI (no consumidor, do tamanho do uso) é o idioma Go: quem
-// define a abstração é quem depende dela, não quem a implementa.
-type recorder interface {
-	Events() []events.Event
-	ClearEvents()
-}
-
-// dispatchAndClear publica os eventos acumulados e limpa o histórico.
-// Concentra num lugar a ordem exigida pelo spec §6 e o cuidado de não
-// limpar o histórico se o dispatch falhar — no v1 o dispatcher é síncrono,
-// então erro de handler aborta o use case e os eventos ficam no aggregate.
-func dispatchAndClear(ctx context.Context, dispatcher events.Dispatcher, aggregate recorder) error {
-	recorded := aggregate.Events()
-	if len(recorded) == 0 {
-		return nil
-	}
-	if err := dispatcher.Dispatch(ctx, recorded...); err != nil {
-		return err
-	}
-	aggregate.ClearEvents()
-	return nil
 }
 
 // toCategorizeTransactionOutput projeta a atribuição recém-feita. Retorna

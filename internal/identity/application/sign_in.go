@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
-	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
 // SignInInput é a entrada: o token cru como veio no header.
@@ -41,14 +40,12 @@ type SignInOutput struct {
 // autenticação é do provedor, "existir no Google e não existir aqui" só pode
 // significar "primeiro acesso".
 type SignInUseCase struct {
-	users      identity.Repository
-	verifier   identity.TokenVerifier
-	dispatcher events.Dispatcher
+	users    identity.Repository
+	verifier identity.TokenVerifier
 }
 
-// NewSignInUseCase injeta as dependências por construtor.
-func NewSignInUseCase(users identity.Repository, verifier identity.TokenVerifier, dispatcher events.Dispatcher) *SignInUseCase {
-	return &SignInUseCase{users: users, verifier: verifier, dispatcher: dispatcher}
+func NewSignInUseCase(users identity.Repository, verifier identity.TokenVerifier) *SignInUseCase {
+	return &SignInUseCase{users: users, verifier: verifier}
 }
 
 // Execute verifica o token, constrói os VOs e resolve o usuário local:
@@ -91,7 +88,7 @@ func (u *SignInUseCase) Execute(ctx context.Context, input SignInInput) (SignInO
 	return u.signInExisting(ctx, existing, email, name, avatar)
 }
 
-// register provisiona o usuário no primeiro acesso e publica Registered.
+// register provisiona o usuário no primeiro acesso; o Registered sai pelo Save.
 func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name string, avatar identity.AvatarURL, external identity.ExternalIdentity) (SignInOutput, error) {
 	registered, err := identity.Register(email, name, avatar, external)
 	if err != nil {
@@ -101,13 +98,6 @@ func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name
 	if err := u.users.Save(ctx, registered); err != nil {
 		return SignInOutput{}, err
 	}
-
-	// Save → Dispatch → ClearEvents, a mesma ordem do spec §6.
-	recorded := registered.Events()
-	if err := u.dispatcher.Dispatch(ctx, recorded...); err != nil {
-		return SignInOutput{}, err
-	}
-	registered.ClearEvents()
 
 	return toSignInOutput(registered, true), nil
 }

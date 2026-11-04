@@ -15,73 +15,112 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 )
 
-// TestRecordTransactionUseCase_Execute cobre o caminho feliz de uma SAÍDA
-// (valor negativo na convenção patrimônio) e a decisão de a transação
-// HERDAR a moeda da conta.
-func TestRecordTransactionUseCase_Execute(t *testing.T) {
+func TestRecordTransaction(t *testing.T) {
 	t.Parallel()
 
-	ownerID := uuid.New()
-	targetAccount := newManualAccount(t, ownerID, "BRL")
-	accountID := targetAccount.ID()
+	t.Run("should save an outflow that inherits the account currency and saves no event", func(t *testing.T) {
+		t.Parallel()
 
-	accounts := newFakeAccounts(targetAccount)
-	transactions := newFakeTransactions()
-	useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		ownerID := uuid.New()
+		targetAccount := newManualAccount(t, ownerID, "BRL")
+		accountID := targetAccount.ID()
+		accounts := newFakeAccounts(targetAccount)
+		transactions := newFakeTransactions()
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		occurredAt := time.Now().Add(-2 * time.Hour)
 
-	occurredAt := time.Now().Add(-2 * time.Hour)
-	output, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
-		UserID:      ownerID,
-		AccountID:   accountID.UUID(),
-		Amount:      -4550,
-		OccurredAt:  occurredAt,
-		Description: "  Padaria  ",
+		output, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
+			UserID:      ownerID,
+			AccountID:   accountID.UUID(),
+			Amount:      -4550,
+			OccurredAt:  occurredAt,
+			Description: "  Bakery  ",
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, int64(-4550), output.Amount)
+		assert.Equal(t, "BRL", output.Currency, "the currency comes from the account, not from the input")
+		assert.Equal(t, "Bakery", output.Description)
+		assert.Equal(t, accountID.String(), output.AccountID)
+		assert.WithinDuration(t, occurredAt, output.OccurredAt, time.Second)
+		require.Len(t, transactions.saved, 1)
+		assert.Empty(t, transactions.savedEvents, "a manual entry saves no event, only the provider flow does")
+		savedBalance := targetAccount.Balance()
+		savedMoney := savedBalance.Money()
+		assert.Zero(t, savedMoney.Amount(), "recording does not touch the balance")
+		assert.Empty(t, accounts.saved, "the account is only READ by this use case")
 	})
 
-	require.NoError(t, err)
-	assert.Equal(t, int64(-4550), output.Amount)
-	assert.Equal(t, "BRL", output.Currency, "a moeda vem da conta, não do input")
-	assert.Equal(t, "Padaria", output.Description)
-	assert.Equal(t, accountID.String(), output.AccountID)
-	assert.WithinDuration(t, occurredAt, output.OccurredAt, time.Second)
+	t.Run("should refuse with ErrForbidden an account of another user before any write", func(t *testing.T) {
+		t.Parallel()
 
-	require.Len(t, transactions.saved, 1)
-	saved := transactions.saved[0]
-	assert.Empty(t, saved.Events(), "lançamento manual não emite evento — só o fluxo de provider emite")
+		otherAccount := newManualAccount(t, uuid.New(), "BRL")
+		accounts := newFakeAccounts(otherAccount)
+		transactions := newFakeTransactions()
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		accountID := otherAccount.ID()
 
-	savedBalance := targetAccount.Balance()
-	savedMoney := savedBalance.Money()
-	assert.Zero(t, savedMoney.Amount(), "o v1 não mexe no saldo ao lançar (decisão do spec)")
-	assert.Empty(t, accounts.saved, "a conta é só LIDA neste use case")
+		_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
+			UserID:      uuid.New(),
+			AccountID:   accountID.UUID(),
+			Amount:      1000,
+			OccurredAt:  time.Now().Add(-time.Minute),
+			Description: "Attempt",
+		})
+
+		require.ErrorIs(t, err, shared.ErrForbidden)
+		assert.Empty(t, transactions.saved)
+	})
 }
 
-// TestRecordTransactionUseCase_Execute_RecusaContaDeOutroUsuario é o teste
-// de autorização: dono errado morre em ErrForbidden ANTES de qualquer
-// escrita.
-func TestRecordTransactionUseCase_Execute_RecusaContaDeOutroUsuario(t *testing.T) {
+// TestRecordTransactionNeverTouchesBalance guards a product rule, not an
+// implementation detail: the balance enters the system only through the Open
+// Finance import, because the bank is the authority on how much the account
+// holds. Summing entries into the balance would make it disagree with the
+// bank statement, and this test exists to stop that well-meant "fix".
+//
+// The initial balance is non-zero so a wrong sum cannot land on zero by
+// chance, and dated after the account creation because the aggregate refuses
+// a balance that goes back in time.
+func TestRecordTransactionNeverTouchesBalance(t *testing.T) {
 	t.Parallel()
 
-	otherAccount := newManualAccount(t, uuid.New(), "BRL")
-	accounts := newFakeAccounts(otherAccount)
-	transactions := newFakeTransactions()
-	useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+	t.Run("should keep a non-zero provider balance untouched after several entries", func(t *testing.T) {
+		t.Parallel()
 
-	accountID := otherAccount.ID()
-	_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
-		UserID:      uuid.New(), // outro usuário
-		AccountID:   accountID.UUID(),
-		Amount:      1000,
-		OccurredAt:  time.Now().Add(-time.Minute),
-		Description: "Tentativa",
+		ownerID := uuid.New()
+		targetAccount := newManualAccount(t, ownerID, "BRL")
+		accountID := targetAccount.ID()
+		initial, err := account.NewBalance(mustMoney(t, 1_000_00, "BRL"), time.Now().Add(time.Second))
+		require.NoError(t, err)
+		require.NoError(t, targetAccount.UpdateBalance(initial))
+		targetAccount.ClearEvents()
+		accounts := newFakeAccounts(targetAccount)
+		transactions := newFakeTransactions()
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+
+		for _, amount := range []int64{-45_50, -120_00, 300_00} {
+			_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
+				UserID:      ownerID,
+				AccountID:   accountID.UUID(),
+				Amount:      amount,
+				OccurredAt:  time.Now().Add(-time.Minute),
+				Description: "Entry",
+			})
+			require.NoError(t, err)
+		}
+
+		require.Len(t, transactions.saved, 3, "the transactions were recorded")
+		balance := targetAccount.Balance()
+		money := balance.Money()
+		assert.Equal(t, int64(1_000_00), money.Amount(), "the balance stays exactly what the provider reported")
+		assert.Empty(t, accounts.saved, "the account is not even saved again: this use case only READS it")
+		assert.Empty(t, targetAccount.Events(), "no AccountBalanceUpdated was recorded")
+		assert.Empty(t, accounts.savedEvents)
 	})
-
-	require.ErrorIs(t, err, shared.ErrForbidden)
-	assert.Empty(t, transactions.saved)
 }
 
-// TestRecordTransactionUseCase_Execute_Recusa cobre os inputs inválidos e a
-// conta inexistente.
-func TestRecordTransactionUseCase_Execute_Recusa(t *testing.T) {
+func TestRecordTransactionRefusal(t *testing.T) {
 	t.Parallel()
 
 	validOccurredAt := time.Now().Add(-time.Hour)
@@ -92,37 +131,37 @@ func TestRecordTransactionUseCase_Execute_Recusa(t *testing.T) {
 		wantErr     error
 	}{
 		{
-			name:        "usuário nil",
+			name:        "should refuse a nil user",
 			mutateInput: func(input *application.RecordTransactionInput) { input.UserID = uuid.Nil },
 			wantErr:     shared.ErrInvalidUserID,
 		},
 		{
-			name:        "conta nil",
+			name:        "should refuse a nil account",
 			mutateInput: func(input *application.RecordTransactionInput) { input.AccountID = uuid.Nil },
 			wantErr:     account.ErrInvalidID,
 		},
 		{
-			name:        "conta inexistente",
+			name:        "should refuse a missing account",
 			mutateInput: func(input *application.RecordTransactionInput) { input.AccountID = uuid.New() },
 			wantErr:     account.ErrNotFound,
 		},
 		{
-			name:        "valor zero",
+			name:        "should refuse a zero amount",
 			mutateInput: func(input *application.RecordTransactionInput) { input.Amount = 0 },
 			wantErr:     transaction.ErrZeroMoney,
 		},
 		{
-			name:        "descrição vazia",
+			name:        "should refuse a blank description",
 			mutateInput: func(input *application.RecordTransactionInput) { input.Description = "  " },
 			wantErr:     transaction.ErrInvalidDescription,
 		},
 		{
-			name:        "data no futuro",
+			name:        "should refuse a date in the future",
 			mutateInput: func(input *application.RecordTransactionInput) { input.OccurredAt = time.Now().Add(time.Hour) },
 			wantErr:     transaction.ErrInvalidOccurredAt,
 		},
 		{
-			name:        "data zero",
+			name:        "should refuse a zero date",
 			mutateInput: func(input *application.RecordTransactionInput) { input.OccurredAt = time.Time{} },
 			wantErr:     transaction.ErrInvalidOccurredAt,
 		},
@@ -138,13 +177,12 @@ func TestRecordTransactionUseCase_Execute_Recusa(t *testing.T) {
 			accounts := newFakeAccounts(targetAccount)
 			transactions := newFakeTransactions()
 			useCase := application.NewRecordTransactionUseCase(transactions, accounts)
-
 			input := application.RecordTransactionInput{
 				UserID:      ownerID,
 				AccountID:   accountID.UUID(),
 				Amount:      -1000,
 				OccurredAt:  validOccurredAt,
-				Description: "Mercado",
+				Description: "Groceries",
 			}
 			testCase.mutateInput(&input)
 
@@ -156,9 +194,7 @@ func TestRecordTransactionUseCase_Execute_Recusa(t *testing.T) {
 	}
 }
 
-// TestRecordTransactionUseCase_Execute_PropagaErroDeInfra cobre as duas
-// fronteiras: falha ao LER a conta e falha ao GRAVAR a transação.
-func TestRecordTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
+func TestRecordTransactionInfrastructureFailure(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -166,11 +202,11 @@ func TestRecordTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 		arrange func(accounts *fakeAccounts, transactions *fakeTransactions)
 	}{
 		{
-			name:    "falha lendo a conta",
+			name:    "should return the error when reading the account fails",
 			arrange: func(accounts *fakeAccounts, _ *fakeTransactions) { accounts.findErr = errInfra },
 		},
 		{
-			name:    "falha gravando a transação",
+			name:    "should return the error when saving the transaction fails",
 			arrange: func(_ *fakeAccounts, transactions *fakeTransactions) { transactions.saveErr = errInfra },
 		},
 	}
@@ -185,68 +221,17 @@ func TestRecordTransactionUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
 			accounts := newFakeAccounts(targetAccount)
 			transactions := newFakeTransactions()
 			testCase.arrange(accounts, transactions)
-
 			useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+
 			_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
 				UserID:      ownerID,
 				AccountID:   accountID.UUID(),
 				Amount:      2500,
 				OccurredAt:  time.Now().Add(-time.Hour),
-				Description: "Salário",
+				Description: "Salary",
 			})
 
 			require.ErrorIs(t, err, errInfra)
 		})
 	}
-}
-
-// TestRecordTransactionNuncaMexeNoSaldo é TESTE DE REGRESSÃO de uma regra de
-// produto, não de um detalhe de implementação: o saldo entra no sistema por
-// um caminho só, a importação Open Finance (firmado em 2026-08-27).
-//
-// O banco é a autoridade sobre quanto existe na conta. Se um dia alguém
-// "consertar" isto somando os lançamentos no saldo, o número passa a
-// discordar do extrato bancário — e o usuário confia no errado. É esse
-// conserto bem-intencionado que este teste existe pra impedir.
-func TestRecordTransactionNuncaMexeNoSaldo(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	targetAccount := newManualAccount(t, ownerID, "BRL")
-	accountID := targetAccount.ID()
-
-	// Parte de um saldo NÃO-ZERO, como se tivesse vindo de uma importação:
-	// com saldo zero, um teste passaria mesmo se o código somasse errado e
-	// resultasse em zero por coincidência.
-	// asOf DEPOIS do instante em que a conta nasceu: o aggregate recusa
-	// saldo que volta no tempo (ErrStaleBalance), então um asOf no passado
-	// aqui faria o setup do próprio teste falhar.
-	initial, err := account.NewBalance(mustMoney(t, 1_000_00, "BRL"), time.Now().Add(time.Second))
-	require.NoError(t, err)
-	require.NoError(t, targetAccount.UpdateBalance(initial))
-	targetAccount.ClearEvents()
-
-	accounts := newFakeAccounts(targetAccount)
-	transactions := newFakeTransactions()
-	useCase := application.NewRecordTransactionUseCase(transactions, accounts)
-
-	// Vários lançamentos, entrada e saída.
-	for _, amount := range []int64{-45_50, -120_00, 300_00} {
-		_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
-			UserID:      ownerID,
-			AccountID:   accountID.UUID(),
-			Amount:      amount,
-			OccurredAt:  time.Now().Add(-time.Minute),
-			Description: "Lançamento",
-		})
-		require.NoError(t, err)
-	}
-
-	require.Len(t, transactions.saved, 3, "as transações entraram")
-
-	balance := targetAccount.Balance()
-	money := balance.Money()
-	assert.Equal(t, int64(1_000_00), money.Amount(), "o saldo continua exatamente o que o provedor informou")
-	assert.Empty(t, accounts.saved, "a conta nem é regravada: este use case só LÊ a conta")
-	assert.Empty(t, targetAccount.Events(), "nenhum AccountBalanceUpdated foi emitido")
 }

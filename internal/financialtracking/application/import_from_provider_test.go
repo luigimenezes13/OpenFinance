@@ -16,8 +16,8 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 )
 
-// providerTransaction monta o DTO de fronteira já normalizado (é o que o
-// adapter entrega: centavos, sinal patrimônio, UTC).
+// providerTransaction builds the boundary DTO already normalized, as the
+// adapter delivers it: cents, net-worth sign, UTC.
 func providerTransaction(providerID string, amountInCents int64, description string) openfinance.ProviderTransaction {
 	return openfinance.ProviderTransaction{
 		ProviderTransactionID: providerID,
@@ -28,380 +28,305 @@ func providerTransaction(providerID string, amountInCents int64, description str
 	}
 }
 
-// TestImportFromProviderUseCase_Execute cobre o caminho feliz: duas
-// transações importadas, cada uma emitindo Imported, e o provider consultado
-// com a referência que veio do VO Source (não do input).
-func TestImportFromProviderUseCase_Execute(t *testing.T) {
-	t.Parallel()
+type importScenario struct {
+	ownerID      uuid.UUID
+	connected    *account.Account
+	accounts     *fakeAccounts
+	transactions *fakeTransactions
+	provider     *fakeProvider
+	unitOfWork   *fakeUnitOfWork
+}
+
+func newImportScenario(t *testing.T) importScenario {
+	t.Helper()
 
 	ownerID := uuid.New()
 	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	provider := &fakeProvider{
-		name: "pluggy",
-		transactions: []openfinance.ProviderTransaction{
-			providerTransaction("tx-1", -8990, "Mercado Livre"),
-			providerTransaction("tx-2", 350000, "Salário"),
-		},
+	return importScenario{
+		ownerID:      ownerID,
+		connected:    connected,
+		accounts:     newFakeAccounts(connected),
+		transactions: newFakeTransactions(),
+		provider:     &fakeProvider{name: "pluggy"},
+		unitOfWork:   &fakeUnitOfWork{},
 	}
-	accounts := newFakeAccounts(connected)
-	transactions := newFakeTransactions()
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewImportFromProviderUseCase(transactions, accounts, provider, dispatcher)
-
-	since := time.Now().Add(-30 * 24 * time.Hour)
-	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID:    ownerID,
-		AccountID: accountID.UUID(),
-		Since:     since,
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, accountID.String(), output.AccountID)
-	assert.Equal(t, "pluggy", output.Provider)
-	require.Len(t, output.TransactionIDs, 2)
-
-	assert.Equal(t, "pluggy-acc-77", provider.calledAccountID, "a referência do provider sai do VO Source da conta")
-	assert.WithinDuration(t, since, provider.calledSince, time.Second)
-	assert.Equal(t, 1, provider.balanceRequests, "o saldo é consultado uma vez por importação")
-
-	require.Len(t, transactions.saved, 2)
-	assert.Equal(t,
-		[]string{transaction.EventTypeImported, transaction.EventTypeImported, account.EventTypeBalanceUpdated},
-		dispatcher.eventNames(),
-		"cada transação emite Imported, e o saldo do provedor emite BalanceUpdated no fim",
-	)
-
-	imported := transactions.saved[0]
-	assert.Empty(t, imported.Events(), "ClearEvents roda depois do dispatch")
-	importedRef, ok := imported.ExternalRef()
-	require.True(t, ok, "transação de provider nasce com referência externa")
-	assert.Equal(t, "pluggy", importedRef.Provider())
-	assert.Equal(t, "tx-1", importedRef.ProviderTransactionID())
 }
 
-// TestImportFromProviderUseCase_Execute_SemNovidade: lista vazia é resultado
-// legítimo, não erro.
-func TestImportFromProviderUseCase_Execute_SemNovidade(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	provider := &fakeProvider{name: "pluggy"}
-	transactions := newFakeTransactions()
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewImportFromProviderUseCase(transactions, newFakeAccounts(connected), provider, dispatcher)
-
-	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID:    ownerID,
-		AccountID: accountID.UUID(),
-	})
-
-	require.NoError(t, err)
-	assert.Empty(t, output.TransactionIDs)
-	assert.Empty(t, transactions.saved)
-	assert.True(t, provider.calledSince.IsZero(), "Since zero = todo o histórico")
-
-	// Sem transação nova, MAS o saldo é atualizado: são duas perguntas
-	// independentes ao provedor, e o saldo pode mudar sem lançamento novo na
-	// janela consultada (uma transação antiga liquidada, por exemplo).
-	assert.Equal(t, []string{account.EventTypeBalanceUpdated}, dispatcher.eventNames())
-	assert.True(t, output.BalanceApplied)
+func (s importScenario) execute() (application.ImportFromProviderOutput, error) {
+	accountID := s.connected.ID()
+	return s.executeFor(application.ImportFromProviderInput{UserID: s.ownerID, AccountID: accountID.UUID()})
 }
 
-// TestImportFromProviderUseCase_Execute_Recusa cobre as recusas que são
-// específicas deste use case: conta manual, conta de outro provider, conta
-// de outro usuário e moeda divergente na fronteira.
-func TestImportFromProviderUseCase_Execute_Recusa(t *testing.T) {
+func (s importScenario) executeFor(input application.ImportFromProviderInput) (application.ImportFromProviderOutput, error) {
+	useCase := application.NewImportFromProviderUseCase(s.transactions, s.accounts, s.provider, s.unitOfWork)
+	return useCase.Execute(context.Background(), input)
+}
+
+func (s importScenario) assertNothingSaved(t *testing.T) {
+	t.Helper()
+	assert.Empty(t, s.transactions.saved, "no transaction is saved")
+	assert.Empty(t, s.accounts.saved, "the account is not saved")
+	assert.Empty(t, s.transactions.savedEvents)
+	assert.Empty(t, s.accounts.savedEvents)
+}
+
+func TestImportFromProvider(t *testing.T) {
 	t.Parallel()
 
-	t.Run("conta manual não importa", func(t *testing.T) {
+	t.Run("should import every provider transaction using the reference from the account Source, not from the input", func(t *testing.T) {
 		t.Parallel()
 
-		ownerID := uuid.New()
-		manual := newManualAccount(t, ownerID, "BRL")
-		accountID := manual.ID()
-		transactions := newFakeTransactions()
-		provider := &fakeProvider{name: "pluggy"}
-		useCase := application.NewImportFromProviderUseCase(transactions, newFakeAccounts(manual), provider, &fakeDispatcher{})
+		scenario := newImportScenario(t)
+		scenario.provider.transactions = []openfinance.ProviderTransaction{
+			providerTransaction("tx-1", -8990, "Online store"),
+			providerTransaction("tx-2", 350000, "Salary"),
+		}
+		accountID := scenario.connected.ID()
+		since := time.Now().Add(-30 * 24 * time.Hour)
 
-		_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-			UserID: ownerID, AccountID: accountID.UUID(),
+		output, err := scenario.executeFor(application.ImportFromProviderInput{
+			UserID:    scenario.ownerID,
+			AccountID: accountID.UUID(),
+			Since:     since,
 		})
 
-		require.ErrorIs(t, err, openfinance.ErrAccountNotConnected)
-		assert.Empty(t, provider.calledAccountID, "nem chega a consultar o provider")
+		require.NoError(t, err)
+		assert.Equal(t, accountID.String(), output.AccountID)
+		assert.Equal(t, "pluggy", output.Provider)
+		require.Len(t, output.TransactionIDs, 2)
+		assert.Equal(t, "pluggy-acc-77", scenario.provider.calledAccountID, "the provider reference comes from the account Source")
+		assert.WithinDuration(t, since, scenario.provider.calledSince, time.Second)
+		assert.Equal(t, 1, scenario.provider.balanceRequests, "the balance is fetched once per import")
+		assert.Equal(t, 1, scenario.unitOfWork.runs, "everything is saved in a single unit of work")
+		require.Len(t, scenario.transactions.saved, 2)
+		assert.Equal(t,
+			[]string{transaction.EventTypeImported, transaction.EventTypeImported},
+			scenario.transactions.savedEventNames(),
+			"each imported transaction saves its Imported event",
+		)
+		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames(), "the provider balance saves BalanceUpdated")
+		imported := scenario.transactions.saved[0]
+		assert.Empty(t, imported.Events(), "the save clears the recorded events")
+		importedRef, ok := imported.ExternalRef()
+		require.True(t, ok, "a provider transaction is born with an external reference")
+		assert.Equal(t, "pluggy", importedRef.Provider())
+		assert.Equal(t, "tx-1", importedRef.ProviderTransactionID())
 	})
 
-	t.Run("conta de outro provider", func(t *testing.T) {
+	t.Run("should fetch transactions and balance from the provider before opening the unit of work, so no lock is held during the network call", func(t *testing.T) {
 		t.Parallel()
 
-		ownerID := uuid.New()
-		connected := newConnectedAccount(t, ownerID, "belvo", "belvo-acc-1", "BRL")
-		accountID := connected.ID()
-		provider := &fakeProvider{name: "pluggy"}
-		useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), newFakeAccounts(connected), provider, &fakeDispatcher{})
+		scenario := newImportScenario(t)
+		order := &callOrder{}
+		scenario.provider.order = order
+		scenario.unitOfWork.order = order
+		scenario.provider.transactions = []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Taxi")}
 
-		_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-			UserID: ownerID, AccountID: accountID.UUID(),
-		})
+		_, err := scenario.execute()
 
-		require.ErrorIs(t, err, openfinance.ErrProviderMismatch)
+		require.NoError(t, err)
+		assert.Equal(t,
+			[]string{"provider.FetchTransactions", "provider.FetchBalance", "unitOfWork.Run"},
+			order.calls,
+		)
 	})
 
-	t.Run("conta de outro usuário", func(t *testing.T) {
+	t.Run("should update the balance even with no new transaction, since the balance can change without a new entry in the window", func(t *testing.T) {
 		t.Parallel()
 
-		connected := newConnectedAccount(t, uuid.New(), "pluggy", "pluggy-acc-77", "BRL")
-		accountID := connected.ID()
-		useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), newFakeAccounts(connected), &fakeProvider{name: "pluggy"}, &fakeDispatcher{})
+		scenario := newImportScenario(t)
 
-		_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-			UserID: uuid.New(), AccountID: accountID.UUID(),
-		})
+		output, err := scenario.execute()
 
-		require.ErrorIs(t, err, shared.ErrForbidden)
+		require.NoError(t, err)
+		assert.Empty(t, output.TransactionIDs, "an empty list is a legitimate result, not an error")
+		assert.Empty(t, scenario.transactions.saved)
+		assert.True(t, scenario.provider.calledSince.IsZero(), "a zero Since means the whole history")
+		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames())
+		assert.True(t, output.BalanceApplied)
 	})
 
-	t.Run("moeda divergente na fronteira", func(t *testing.T) {
+	t.Run("should change the account balance through this path, the only one allowed to", func(t *testing.T) {
 		t.Parallel()
 
-		ownerID := uuid.New()
-		connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-		accountID := connected.ID()
+		scenario := newImportScenario(t)
+		scenario.provider.balance = &openfinance.ProviderBalance{AmountInCents: 1_234_56, CurrencyCode: "BRL", AsOf: time.Now()}
 
-		dollarTransaction := providerTransaction("tx-usd", -1000, "Steam")
-		dollarTransaction.CurrencyCode = "USD"
-		provider := &fakeProvider{name: "pluggy", transactions: []openfinance.ProviderTransaction{dollarTransaction}}
-		transactions := newFakeTransactions()
-		useCase := application.NewImportFromProviderUseCase(transactions, newFakeAccounts(connected), provider, &fakeDispatcher{})
+		output, err := scenario.execute()
 
-		_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-			UserID: ownerID, AccountID: accountID.UUID(),
-		})
-
-		require.ErrorIs(t, err, account.ErrCurrencyMismatch)
-		assert.Empty(t, transactions.saved)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1_234_56), output.Balance)
+		assert.Equal(t, "BRL", output.Currency)
+		assert.True(t, output.BalanceApplied)
+		balance := scenario.connected.Balance()
+		money := balance.Money()
+		assert.Equal(t, int64(1_234_56), money.Amount())
+		require.Len(t, scenario.accounts.saved, 1, "an account with a new balance is persisted")
+		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames())
 	})
 
-	t.Run("conta inexistente", func(t *testing.T) {
+	t.Run("should accept a negative balance because card debt is negative in the net-worth convention", func(t *testing.T) {
 		t.Parallel()
 
-		useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), newFakeAccounts(), &fakeProvider{name: "pluggy"}, &fakeDispatcher{})
+		scenario := newImportScenario(t)
+		scenario.provider.balance = &openfinance.ProviderBalance{AmountInCents: -4_500_00, CurrencyCode: "BRL", AsOf: time.Now()}
 
-		_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-			UserID: uuid.New(), AccountID: uuid.New(),
-		})
+		output, err := scenario.execute()
 
-		require.ErrorIs(t, err, account.ErrNotFound)
-	})
-}
-
-// TestImportFromProviderUseCase_Execute_AbortaNoPrimeiroErro documenta a
-// decisão do v1: falha no meio da importação aborta tudo. O que já foi
-// salvo FICA salvo (não há transação de banco no v1) — e é justamente isso
-// que o PR4 precisa resolver junto com a idempotência.
-func TestImportFromProviderUseCase_Execute_AbortaNoPrimeiroErro(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	invalid := providerTransaction("", -500, "Sem referência externa")
-	provider := &fakeProvider{
-		name: "pluggy",
-		transactions: []openfinance.ProviderTransaction{
-			providerTransaction("tx-ok", -1500, "Uber"),
-			invalid,
-			providerTransaction("tx-nunca-chega", -2500, "iFood"),
-		},
-	}
-	transactions := newFakeTransactions()
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewImportFromProviderUseCase(transactions, newFakeAccounts(connected), provider, dispatcher)
-
-	_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID: ownerID, AccountID: accountID.UUID(),
+		require.NoError(t, err)
+		assert.Equal(t, int64(-4_500_00), output.Balance)
 	})
 
-	require.ErrorIs(t, err, transaction.ErrInvalidRef)
-	assert.Len(t, transactions.saved, 1, "a primeira já tinha sido persistida")
-	assert.Len(t, dispatcher.dispatched, 1)
-}
+	t.Run("should ignore a balance older than the recorded one without failing, since syncs arrive out of order", func(t *testing.T) {
+		t.Parallel()
 
-// TestImportFromProviderUseCase_Execute_PropagaErroDeInfra cobre as três
-// fronteiras que podem falhar: ler a conta, consultar o provider e gravar.
-func TestImportFromProviderUseCase_Execute_PropagaErroDeInfra(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name    string
-		arrange func(accounts *fakeAccounts, transactions *fakeTransactions, provider *fakeProvider)
-		wantErr error
-	}{
-		{
-			name: "falha lendo a conta",
-			arrange: func(accounts *fakeAccounts, _ *fakeTransactions, _ *fakeProvider) {
-				accounts.findErr = errInfra
-			},
-			wantErr: errInfra,
-		},
-		{
-			name: "provider indisponível",
-			arrange: func(_ *fakeAccounts, _ *fakeTransactions, provider *fakeProvider) {
-				provider.fetchErr = openfinance.ErrProviderUnavailable
-			},
-			wantErr: openfinance.ErrProviderUnavailable,
-		},
-		{
-			name: "falha gravando a transação",
-			arrange: func(_ *fakeAccounts, transactions *fakeTransactions, _ *fakeProvider) {
-				transactions.saveErr = errInfra
-			},
-			wantErr: errInfra,
-		},
-	}
-
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			ownerID := uuid.New()
-			connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-			accountID := connected.ID()
-
-			accounts := newFakeAccounts(connected)
-			transactions := newFakeTransactions()
-			provider := &fakeProvider{
-				name:         "pluggy",
-				transactions: []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Uber")},
-			}
-			testCase.arrange(accounts, transactions, provider)
-
-			useCase := application.NewImportFromProviderUseCase(transactions, accounts, provider, &fakeDispatcher{})
-			_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-				UserID: ownerID, AccountID: accountID.UUID(),
-			})
-
-			require.ErrorIs(t, err, testCase.wantErr)
-		})
-	}
-}
-
-// TestImportFromProviderUseCase_SaldoVemDoProvedor é o teste da REGRA
-// central: o saldo da conta muda por este caminho e só por ele.
-func TestImportFromProviderUseCase_SaldoVemDoProvedor(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	provider := &fakeProvider{
-		name: "pluggy",
-		balance: &openfinance.ProviderBalance{
-			AmountInCents: 1_234_56,
-			CurrencyCode:  "BRL",
-			AsOf:          time.Now(),
-		},
-	}
-	accounts := newFakeAccounts(connected)
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, dispatcher)
-
-	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID: ownerID, AccountID: accountID.UUID(),
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, int64(1_234_56), output.Balance)
-	assert.Equal(t, "BRL", output.Currency)
-	assert.True(t, output.BalanceApplied)
-
-	// O saldo foi para o aggregate E para o repositório.
-	balance := connected.Balance()
-	money := balance.Money()
-	assert.Equal(t, int64(1_234_56), money.Amount())
-	require.Len(t, accounts.saved, 1, "conta com saldo novo é persistida")
-
-	// E o evento que existia só no papel agora dispara de verdade.
-	require.Len(t, dispatcher.dispatched, 1)
-	assert.Equal(t, account.EventTypeBalanceUpdated, dispatcher.dispatched[0].EventName())
-}
-
-// TestImportFromProviderUseCase_SaldoNegativo cobre a convenção patrimônio:
-// dívida de cartão é NEGATIVA, e o adapter normaliza a fatura positiva da
-// Pluggy antes de chegar aqui.
-func TestImportFromProviderUseCase_SaldoNegativo(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	provider := &fakeProvider{
-		name:    "pluggy",
-		balance: &openfinance.ProviderBalance{AmountInCents: -4_500_00, CurrencyCode: "BRL", AsOf: time.Now()},
-	}
-	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), newFakeAccounts(connected), provider, &fakeDispatcher{})
-
-	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID: ownerID, AccountID: accountID.UUID(),
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, int64(-4_500_00), output.Balance)
-}
-
-// TestImportFromProviderUseCase_SaldoAntigoEhIgnorado: webhooks e syncs
-// chegam fora de ordem. Saldo mais velho que o registrado é recusado pelo
-// aggregate e o use case SEGUE — não é falha, e o output diz que não aplicou.
-func TestImportFromProviderUseCase_SaldoAntigoEhIgnorado(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-	accountID := connected.ID()
-
-	// Primeiro, um saldo recente.
-	recent, err := account.NewBalance(mustMoney(t, 500_00, "BRL"), time.Now())
-	require.NoError(t, err)
-	require.NoError(t, connected.UpdateBalance(recent))
-	connected.ClearEvents()
-
-	// Agora o provedor responde com um saldo de ontem.
-	provider := &fakeProvider{
-		name: "pluggy",
-		balance: &openfinance.ProviderBalance{
+		scenario := newImportScenario(t)
+		recent, err := account.NewBalance(mustMoney(t, 500_00, "BRL"), time.Now())
+		require.NoError(t, err)
+		require.NoError(t, scenario.connected.UpdateBalance(recent))
+		scenario.connected.ClearEvents()
+		scenario.provider.balance = &openfinance.ProviderBalance{
 			AmountInCents: 1_00,
 			CurrencyCode:  "BRL",
 			AsOf:          time.Now().Add(-24 * time.Hour),
-		},
-	}
-	accounts := newFakeAccounts(connected)
-	dispatcher := &fakeDispatcher{}
-	useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, dispatcher)
+		}
 
-	output, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-		UserID: ownerID, AccountID: accountID.UUID(),
+		output, err := scenario.execute()
+
+		require.NoError(t, err, "an out-of-order balance is not an error")
+		assert.False(t, output.BalanceApplied)
+		balance := scenario.connected.Balance()
+		money := balance.Money()
+		assert.Equal(t, int64(500_00), money.Amount(), "the most recent balance is preserved")
+		assert.Empty(t, scenario.accounts.saved, "nothing to persist")
+		assert.Empty(t, scenario.accounts.savedEvents, "nothing happened, no event")
 	})
-
-	require.NoError(t, err, "saldo fora de ordem não é erro")
-	assert.False(t, output.BalanceApplied)
-
-	balance := connected.Balance()
-	money := balance.Money()
-	assert.Equal(t, int64(500_00), money.Amount(), "o saldo mais recente é preservado")
-	assert.Empty(t, accounts.saved, "nada a persistir")
-	assert.Empty(t, dispatcher.dispatched, "nada aconteceu, nenhum evento")
 }
 
-// TestImportFromProviderUseCase_SaldoInvalido cobre as recusas do saldo.
-func TestImportFromProviderUseCase_SaldoInvalido(t *testing.T) {
+func TestImportFromProviderRefusal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("should refuse a manual account without querying the provider", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		manual := newManualAccount(t, scenario.ownerID, "BRL")
+		scenario.accounts = newFakeAccounts(manual)
+		accountID := manual.ID()
+
+		_, err := scenario.executeFor(application.ImportFromProviderInput{UserID: scenario.ownerID, AccountID: accountID.UUID()})
+
+		require.ErrorIs(t, err, openfinance.ErrAccountNotConnected)
+		assert.Empty(t, scenario.provider.calledAccountID, "the provider is never queried")
+		assert.Zero(t, scenario.unitOfWork.runs)
+	})
+
+	t.Run("should refuse an account of another provider", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		otherProvider := newConnectedAccount(t, scenario.ownerID, "belvo", "belvo-acc-1", "BRL")
+		scenario.accounts = newFakeAccounts(otherProvider)
+		accountID := otherProvider.ID()
+
+		_, err := scenario.executeFor(application.ImportFromProviderInput{UserID: scenario.ownerID, AccountID: accountID.UUID()})
+
+		require.ErrorIs(t, err, openfinance.ErrProviderMismatch)
+		assert.Zero(t, scenario.unitOfWork.runs)
+	})
+
+	t.Run("should refuse an account of another user", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		accountID := scenario.connected.ID()
+
+		_, err := scenario.executeFor(application.ImportFromProviderInput{UserID: uuid.New(), AccountID: accountID.UUID()})
+
+		require.ErrorIs(t, err, shared.ErrForbidden)
+		assert.Zero(t, scenario.unitOfWork.runs)
+	})
+
+	t.Run("should refuse a missing account", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+
+		_, err := scenario.executeFor(application.ImportFromProviderInput{UserID: uuid.New(), AccountID: uuid.New()})
+
+		require.ErrorIs(t, err, account.ErrNotFound)
+		assert.Zero(t, scenario.unitOfWork.runs)
+	})
+}
+
+func TestImportFromProviderAllOrNothing(t *testing.T) {
+	t.Parallel()
+
+	t.Run("should save nothing when one provider transaction has another currency", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		dollarTransaction := providerTransaction("tx-usd", -1000, "Steam")
+		dollarTransaction.CurrencyCode = "USD"
+		scenario.provider.transactions = []openfinance.ProviderTransaction{
+			providerTransaction("tx-brl", -1500, "Taxi"),
+			dollarTransaction,
+		}
+
+		_, err := scenario.execute()
+
+		require.ErrorIs(t, err, account.ErrCurrencyMismatch)
+		assert.Zero(t, scenario.unitOfWork.runs, "the unit of work never opens")
+		scenario.assertNothingSaved(t)
+	})
+
+	t.Run("should save nothing when one provider transaction is invalid, even the valid ones before it", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		scenario.provider.transactions = []openfinance.ProviderTransaction{
+			providerTransaction("tx-ok", -1500, "Taxi"),
+			providerTransaction("", -500, "No external reference"),
+			providerTransaction("tx-never-arrives", -2500, "Food delivery"),
+		}
+
+		_, err := scenario.execute()
+
+		require.ErrorIs(t, err, transaction.ErrInvalidRef)
+		assert.Zero(t, scenario.unitOfWork.runs, "the unit of work never opens")
+		scenario.assertNothingSaved(t)
+	})
+
+	t.Run("should save nothing when fetching the balance fails, not even the transactions already fetched", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		scenario.provider.transactions = []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Taxi")}
+		scenario.provider.balanceErr = openfinance.ErrProviderUnavailable
+
+		_, err := scenario.execute()
+
+		require.ErrorIs(t, err, openfinance.ErrProviderUnavailable)
+		assert.Zero(t, scenario.unitOfWork.runs, "the unit of work never opens")
+		scenario.assertNothingSaved(t)
+	})
+
+	t.Run("should return the error and save the account only through the unit of work", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		scenario.provider.transactions = []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Taxi")}
+		scenario.unitOfWork.err = errInfra
+
+		_, err := scenario.execute()
+
+		require.ErrorIs(t, err, errInfra)
+		assert.Equal(t, 1, scenario.unitOfWork.runs)
+		scenario.assertNothingSaved(t)
+	})
+}
+
+func TestImportFromProviderInvalidBalance(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -410,25 +335,18 @@ func TestImportFromProviderUseCase_SaldoInvalido(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "moeda divergente",
+			name: "should refuse a balance in another currency",
 			arrange: func(provider *fakeProvider) {
 				provider.balance = &openfinance.ProviderBalance{AmountInCents: 100, CurrencyCode: "USD", AsOf: time.Now()}
 			},
 			wantErr: account.ErrCurrencyMismatch,
 		},
 		{
-			name: "instante ausente",
+			name: "should refuse a balance without an instant",
 			arrange: func(provider *fakeProvider) {
 				provider.balance = &openfinance.ProviderBalance{AmountInCents: 100, CurrencyCode: "BRL"}
 			},
 			wantErr: account.ErrInvalidBalance,
-		},
-		{
-			name: "provider indisponível na consulta de saldo",
-			arrange: func(provider *fakeProvider) {
-				provider.balanceErr = openfinance.ErrProviderUnavailable
-			},
-			wantErr: openfinance.ErrProviderUnavailable,
 		},
 	}
 
@@ -436,21 +354,59 @@ func TestImportFromProviderUseCase_SaldoInvalido(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			ownerID := uuid.New()
-			connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-77", "BRL")
-			accountID := connected.ID()
-			provider := &fakeProvider{name: "pluggy"}
-			testCase.arrange(provider)
+			scenario := newImportScenario(t)
+			testCase.arrange(scenario.provider)
 
-			accounts := newFakeAccounts(connected)
-			useCase := application.NewImportFromProviderUseCase(newFakeTransactions(), accounts, provider, &fakeDispatcher{})
-
-			_, err := useCase.Execute(context.Background(), application.ImportFromProviderInput{
-				UserID: ownerID, AccountID: accountID.UUID(),
-			})
+			_, err := scenario.execute()
 
 			require.ErrorIs(t, err, testCase.wantErr)
-			assert.Empty(t, accounts.saved)
+			assert.Zero(t, scenario.unitOfWork.runs)
+			scenario.assertNothingSaved(t)
+		})
+	}
+}
+
+func TestImportFromProviderInfrastructureFailure(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		arrange func(scenario importScenario)
+		wantErr error
+	}{
+		{
+			name:    "should return the error when reading the account fails",
+			arrange: func(scenario importScenario) { scenario.accounts.findErr = errInfra },
+			wantErr: errInfra,
+		},
+		{
+			name:    "should return the error when the provider is unavailable",
+			arrange: func(scenario importScenario) { scenario.provider.fetchErr = openfinance.ErrProviderUnavailable },
+			wantErr: openfinance.ErrProviderUnavailable,
+		},
+		{
+			name:    "should return the error when saving a transaction fails",
+			arrange: func(scenario importScenario) { scenario.transactions.saveErr = errInfra },
+			wantErr: errInfra,
+		},
+		{
+			name:    "should return the error when saving the account fails",
+			arrange: func(scenario importScenario) { scenario.accounts.saveErr = errInfra },
+			wantErr: errInfra,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			scenario := newImportScenario(t)
+			scenario.provider.transactions = []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Taxi")}
+			testCase.arrange(scenario)
+
+			_, err := scenario.execute()
+
+			require.ErrorIs(t, err, testCase.wantErr)
 		})
 	}
 }
