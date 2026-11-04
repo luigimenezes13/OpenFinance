@@ -9,20 +9,21 @@ import (
 	entcategoryrule "github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/categoryrule"
 	domaincategory "github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // CategoryRepository implementa category.Repository. É o único repositório
 // que escreve em DUAS tabelas, porque a entity CategoryRule vive dentro da
 // fronteira do aggregate Category — logo, dentro da MESMA transação.
 type CategoryRepository struct {
-	client *ent.Client
+	client     *ent.Client
+	unitOfWork kernel.UnitOfWork
 }
 
 var _ domaincategory.Repository = (*CategoryRepository)(nil)
 
-// NewCategoryRepository injeta o client por construtor.
-func NewCategoryRepository(client *ent.Client) *CategoryRepository {
-	return &CategoryRepository{client: client}
+func NewCategoryRepository(client *ent.Client, unitOfWork kernel.UnitOfWork) *CategoryRepository {
+	return &CategoryRepository{client: client, unitOfWork: unitOfWork}
 }
 
 // Save persiste a categoria e suas regras como UMA unidade.
@@ -35,8 +36,8 @@ func NewCategoryRepository(client *ent.Client) *CategoryRepository {
 func (r *CategoryRepository) Save(ctx context.Context, target *domaincategory.Category) error {
 	snapshot := target.Snapshot()
 
-	return withTx(ctx, r.client, func(tx *ent.Tx) error {
-		builder := tx.Category.Create().
+	return r.unitOfWork.Run(ctx, func(ctx context.Context) error {
+		builder := r.client.Category.Create().
 			SetID(snapshot.ID).
 			SetUserID(snapshot.UserID).
 			SetName(snapshot.Name)
@@ -49,7 +50,7 @@ func (r *CategoryRepository) Save(ctx context.Context, target *domaincategory.Ca
 			return fmt.Errorf("entrepo: falha salvando categoria: %w", err)
 		}
 
-		if _, err := tx.CategoryRule.Delete().
+		if _, err := r.client.CategoryRule.Delete().
 			Where(entcategoryrule.CategoryIDEQ(snapshot.ID)).
 			Exec(ctx); err != nil {
 			return fmt.Errorf("entrepo: falha limpando regras da categoria: %w", err)
@@ -63,12 +64,12 @@ func (r *CategoryRepository) Save(ctx context.Context, target *domaincategory.Ca
 		// vez de N.
 		builders := make([]*ent.CategoryRuleCreate, 0, len(snapshot.Rules))
 		for _, rule := range snapshot.Rules {
-			builders = append(builders, tx.CategoryRule.Create().
+			builders = append(builders, r.client.CategoryRule.Create().
 				SetID(rule.ID).
 				SetCategoryID(snapshot.ID).
 				SetKeyword(rule.Keyword))
 		}
-		if _, err := tx.CategoryRule.CreateBulk(builders...).Save(ctx); err != nil {
+		if _, err := r.client.CategoryRule.CreateBulk(builders...).Save(ctx); err != nil {
 			return fmt.Errorf("entrepo: falha salvando regras da categoria: %w", err)
 		}
 

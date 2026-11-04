@@ -12,17 +12,20 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo"
+	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/eventmapper"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/platform/db"
+	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
-// Tamanhos do experimento. Divididos em RODADAS: em vez de rodar 1500
-// operações de uma camada e só depois as da próxima, cada camada roda
-// 500 e a volta se repete 3 vezes. Isso dilui deriva do ambiente (throttle
-// térmico, autovacuum do Postgres, outro processo na máquina) que castigaria
-// sempre quem rodasse por último.
+// The experiment is split into ROUNDS: instead of running every operation of
+// one layer before moving to the next, each layer runs a slice and the loop
+// repeats. That dilutes environment drift (thermal throttling, Postgres
+// autovacuum, another process on the machine) that would always punish
+// whichever layer ran last.
 const (
 	rounds           = 3
 	readsPerRound    = 700
@@ -31,17 +34,15 @@ const (
 	concurrentOps    = 3000
 	concurrentUsers  = 16
 	rulesPerCategory = 5
+	warmUpReads      = 50
+	baselineLayer    = "pgxpool"
 )
 
-// As interfaces abaixo são do TAMANHO do que o benchmark usa (ISP): ele mede
-// Save e FindByID, então não exige das implementações de referência os
-// métodos de listagem das portas completas — escrever SQL de listagem duas
-// vezes só pra satisfazer um contrato que o benchmark não exercita seria
-// código de medição virando código de produção paralelo.
-//
-// As três implementações reais continuam satisfazendo as portas completas do
-// domínio; quem garante isso são as asserções `var _ account.Repository` nos
-// adapters, não este arquivo.
+// accountStore, transactionStore and categoryStore are sized to what the
+// benchmark uses (ISP): it measures Save and FindByID, so the reference
+// implementations are not forced to write listing SQL for a contract the
+// benchmark never exercises. The production adapters still satisfy the full
+// domain ports through their own `var _ account.Repository` assertions.
 type accountStore interface {
 	Save(ctx context.Context, target *account.Account) error
 	FindByID(ctx context.Context, id account.AccountID) (*account.Account, error)
@@ -57,7 +58,6 @@ type categoryStore interface {
 	FindByID(ctx context.Context, id category.CategoryID) (*category.Category, error)
 }
 
-// implementation é uma camada de persistência sob teste.
 type implementation struct {
 	name         string
 	accounts     accountStore
@@ -65,30 +65,42 @@ type implementation struct {
 	categories   categoryStore
 }
 
-// fixtures são os aggregates já persistidos, usados pelos workloads de
-// leitura e de update.
 type fixtures struct {
 	account     *account.Account
 	transaction *transaction.Transaction
 	category    *category.Category
 }
 
-// workload é uma operação medida. `run` executa UMA operação; o harness
-// cronometra cada chamada individualmente (é a latência por operação que
-// interessa, não o tempo total).
+// workload is one measured operation. run executes a SINGLE operation and the
+// harness times each call on its own, because per-operation latency is what
+// matters, not the total time.
 type workload struct {
 	name           string
 	operationsEach int
 	run            func(ctx context.Context, target implementation, prepared fixtures, index int) error
 }
 
-func TestPersistenceLatency(t *testing.T) {
-	ctx := context.Background()
-	ownerID := uuid.New()
+// newUnsubscribedWriter builds the production outbox writer with no
+// subscribers: nothing is queued, so the Ent layer is measured with its unit
+// of work but without River.
+func newUnsubscribedWriter(tb testing.TB) *outbox.AggregateWriter {
+	tb.Helper()
 
-	implementations := []implementation{
+	mappers, err := outbox.NewMappers(eventmapper.All()...)
+	if err != nil {
+		tb.Fatalf("failed to build the event mappers: %v", err)
+	}
+	recorder := outbox.NewRecorder(mappers, outbox.NewSubscriptions(), nil)
+	return outbox.NewAggregateWriter(db.NewUnitOfWork(benchDB), recorder)
+}
+
+func benchmarkImplementations(t *testing.T) []implementation {
+	t.Helper()
+
+	writer := newUnsubscribedWriter(t)
+	return []implementation{
 		{
-			name:         "pgxpool",
+			name:         baselineLayer,
 			accounts:     &pgxAccountRepository{pool: benchPool},
 			transactions: &pgxTransactionRepository{pool: benchPool},
 			categories:   &pgxCategoryRepository{pool: benchPool},
@@ -101,13 +113,20 @@ func TestPersistenceLatency(t *testing.T) {
 		},
 		{
 			name:         "ent",
-			accounts:     entrepo.NewAccountRepository(benchClient),
-			transactions: entrepo.NewTransactionRepository(benchClient),
-			categories:   entrepo.NewCategoryRepository(benchClient),
+			accounts:     entrepo.NewAccountRepository(benchClient, writer),
+			transactions: entrepo.NewTransactionRepository(benchClient, writer),
+			categories:   entrepo.NewCategoryRepository(benchClient, db.NewUnitOfWork(benchDB)),
 		},
 	}
+}
 
-	workloads := []workload{
+// benchmarkWorkloads lists the measured operations. category_save_5rules is
+// the heaviest (database transaction + upsert + delete + multi-row insert of
+// the rules), where the cost of building dynamic queries shows up if it ever
+// does. category_find_5rules reads a parent with children: eager loading
+// (WithRules) in Ent, two queries in the raw versions, semantically the same.
+func benchmarkWorkloads(t *testing.T, ownerID uuid.UUID) []workload {
+	return []workload{
 		{
 			name:           "account_insert",
 			operationsEach: writesPerRound,
@@ -146,9 +165,6 @@ func TestPersistenceLatency(t *testing.T) {
 			},
 		},
 		{
-			// O workload mais pesado: transação de banco + upsert + delete +
-			// insert multi-linha de 5 regras. É onde o custo de montar
-			// query dinâmica aparece, se aparecer.
 			name:           "category_save_5rules",
 			operationsEach: heavyPerRound,
 			run: func(ctx context.Context, target implementation, prepared fixtures, _ int) error {
@@ -156,8 +172,6 @@ func TestPersistenceLatency(t *testing.T) {
 			},
 		},
 		{
-			// Leitura com filho: no Ent é eager loading (WithRules); nas
-			// versões cruas são duas queries. Semanticamente igual.
 			name:           "category_find_5rules",
 			operationsEach: readsPerRound,
 			run: func(ctx context.Context, target implementation, prepared fixtures, _ int) error {
@@ -166,36 +180,52 @@ func TestPersistenceLatency(t *testing.T) {
 			},
 		},
 	}
-
-	prepared := make(map[string]fixtures, len(implementations))
-	samples := make(map[string]map[string]*sample, len(implementations))
-
-	for _, target := range implementations {
-		prepared[target.name] = prepareFixtures(ctx, t, target, ownerID)
-		samples[target.name] = make(map[string]*sample, len(workloads))
-		for _, currentWorkload := range workloads {
-			samples[target.name][currentWorkload.name] = newSample(currentWorkload.operationsEach * rounds)
-		}
-		// Aquecimento: primeira query prepara statement no servidor, primeira
-		// conexão faz handshake, e o Ent inicializa metadata. Medir isso
-		// junto mediria startup, não latência de operação.
-		warmUp(ctx, t, target, prepared[target.name])
-	}
-
-	for round := 1; round <= rounds; round++ {
-		for _, currentWorkload := range workloads {
-			for _, target := range implementations {
-				runWorkload(ctx, t, target, currentWorkload, prepared[target.name], samples[target.name][currentWorkload.name])
-			}
-		}
-		t.Logf("rodada %d/%d concluída", round, rounds)
-	}
-
-	reportSequential(t, implementations, workloads, samples)
-	reportConcurrent(ctx, t, implementations, prepared)
 }
 
-// runWorkload executa e cronometra uma célula da matriz.
+func TestPersistenceLatency(t *testing.T) {
+	t.Run("should report sequential and concurrent latency for every persistence layer", func(t *testing.T) {
+		ctx := context.Background()
+		ownerID := uuid.New()
+		implementations := benchmarkImplementations(t)
+		workloads := benchmarkWorkloads(t, ownerID)
+
+		prepared := make(map[string]fixtures, len(implementations))
+		samples := make(map[string]map[string]*sample, len(implementations))
+
+		for _, target := range implementations {
+			prepared[target.name] = prepareFixtures(ctx, t, target, ownerID)
+			samples[target.name] = newWorkloadSamples(workloads)
+			warmUp(ctx, t, target, prepared[target.name])
+		}
+
+		for round := 1; round <= rounds; round++ {
+			runRound(ctx, t, implementations, workloads, prepared, samples)
+			t.Logf("round %d/%d done", round, rounds)
+		}
+
+		reportSequential(t, implementations, workloads, samples)
+		reportConcurrent(ctx, t, implementations, prepared)
+	})
+}
+
+func newWorkloadSamples(workloads []workload) map[string]*sample {
+	samples := make(map[string]*sample, len(workloads))
+	for _, currentWorkload := range workloads {
+		samples[currentWorkload.name] = newSample(currentWorkload.operationsEach * rounds)
+	}
+	return samples
+}
+
+func runRound(ctx context.Context, t *testing.T, implementations []implementation, workloads []workload, prepared map[string]fixtures, samples map[string]map[string]*sample) {
+	t.Helper()
+
+	for _, currentWorkload := range workloads {
+		for _, target := range implementations {
+			runWorkload(ctx, t, target, currentWorkload, prepared[target.name], samples[target.name][currentWorkload.name])
+		}
+	}
+}
+
 func runWorkload(ctx context.Context, t *testing.T, target implementation, current workload, prepared fixtures, collected *sample) {
 	t.Helper()
 
@@ -204,25 +234,23 @@ func runWorkload(ctx context.Context, t *testing.T, target implementation, curre
 		err := current.run(ctx, target, prepared, index)
 		elapsed := time.Since(start)
 		if err != nil {
-			t.Fatalf("%s/%s falhou na operação %d: %v", target.name, current.name, index, err)
+			t.Fatalf("%s/%s failed on operation %d: %v", target.name, current.name, index, err)
 		}
 		collected.record(elapsed)
 	}
 }
 
-// reportSequential imprime a tabela comparativa. O baseline é pgxpool (a
-// camada mais fina), então o delta responde "quanto custa subir de camada".
+// reportSequential prints the comparison table against pgxpool, the thinnest
+// layer, so the delta answers "how much does moving up a layer cost".
 func reportSequential(t *testing.T, implementations []implementation, workloads []workload, samples map[string]map[string]*sample) {
 	t.Helper()
 
-	const baseline = "pgxpool"
-
 	t.Log("")
-	t.Log("=== LATÊNCIA SEQUENCIAL (por operação) ===")
-	t.Logf("%-22s %-9s %8s %9s %9s %9s %9s   %s", "workload", "camada", "ops", "p50", "p95", "p99", "média", "Δp50 vs pgxpool")
+	t.Log("=== SEQUENTIAL LATENCY (per operation) ===")
+	t.Logf("%-22s %-9s %8s %9s %9s %9s %9s   %s", "workload", "layer", "ops", "p50", "p95", "p99", "mean", "Δp50 vs pgxpool")
 
 	for _, current := range workloads {
-		baselineStats := samples[baseline][current.name].stats()
+		baselineStats := samples[baselineLayer][current.name].stats()
 
 		for _, target := range implementations {
 			currentStats := samples[target.name][current.name].stats()
@@ -234,53 +262,18 @@ func reportSequential(t *testing.T, implementations []implementation, workloads 
 	}
 }
 
-// reportConcurrent mede a leitura mais quente sob concorrência: é onde
-// diferença de pool e de alocação por operação aparece, e não na medição
-// sequencial (onde a máquina está ociosa esperando o banco).
+// reportConcurrent measures the hottest read under concurrency, which is where
+// differences in pooling and per-operation allocation show up; the sequential
+// run leaves the machine idle waiting on the database.
 func reportConcurrent(ctx context.Context, t *testing.T, implementations []implementation, prepared map[string]fixtures) {
 	t.Helper()
 
 	t.Log("")
-	t.Logf("=== LEITURA CONCORRENTE (%d goroutines, %d operações) ===", concurrentUsers, concurrentOps)
-	t.Logf("%-9s %9s %9s %9s %12s", "camada", "p50", "p95", "p99", "ops/s")
+	t.Logf("=== CONCURRENT READS (%d goroutines, %d operations) ===", concurrentUsers, concurrentOps)
+	t.Logf("%-9s %9s %9s %9s %12s", "layer", "p50", "p95", "p99", "ops/s")
 
 	for _, target := range implementations {
-		collected := newSample(concurrentOps)
-		var mutex sync.Mutex
-		var waitGroup sync.WaitGroup
-
-		accountID := prepared[target.name].account.ID()
-		perUser := concurrentOps / concurrentUsers
-		start := time.Now()
-
-		for user := 0; user < concurrentUsers; user++ {
-			waitGroup.Add(1)
-			go func() {
-				defer waitGroup.Done()
-
-				// Cada goroutine acumula localmente e entrega no fim: travar
-				// o mutex por operação mediria a contenção do PRÓPRIO
-				// harness em vez da do repositório.
-				local := make([]time.Duration, 0, perUser)
-				for index := 0; index < perUser; index++ {
-					operationStart := time.Now()
-					if _, err := target.accounts.FindByID(ctx, accountID); err != nil {
-						t.Errorf("%s: leitura concorrente falhou: %v", target.name, err)
-						return
-					}
-					local = append(local, time.Since(operationStart))
-				}
-
-				mutex.Lock()
-				defer mutex.Unlock()
-				for _, duration := range local {
-					collected.record(duration)
-				}
-			}()
-		}
-
-		waitGroup.Wait()
-		totalElapsed := time.Since(start)
+		collected, totalElapsed := readConcurrently(ctx, t, target, prepared[target.name].account.ID())
 		concurrentStats := collected.stats()
 		throughput := float64(concurrentStats.count) / totalElapsed.Seconds()
 
@@ -289,7 +282,48 @@ func reportConcurrent(ctx context.Context, t *testing.T, implementations []imple
 	}
 }
 
-// deltaVersus formata a diferença relativa entre dois percentis.
+func readConcurrently(ctx context.Context, t *testing.T, target implementation, accountID account.AccountID) (*sample, time.Duration) {
+	collected := newSample(concurrentOps)
+	var mutex sync.Mutex
+	var waitGroup sync.WaitGroup
+	perUser := concurrentOps / concurrentUsers
+	start := time.Now()
+
+	for user := 0; user < concurrentUsers; user++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+
+			local := timeReads(ctx, t, target, accountID, perUser)
+
+			mutex.Lock()
+			defer mutex.Unlock()
+			for _, duration := range local {
+				collected.record(duration)
+			}
+		}()
+	}
+
+	waitGroup.Wait()
+	return collected, time.Since(start)
+}
+
+// timeReads collects durations locally and lets the caller merge them once at
+// the end: locking a mutex per operation would measure the harness's own
+// contention instead of the repository's.
+func timeReads(ctx context.Context, t *testing.T, target implementation, accountID account.AccountID, reads int) []time.Duration {
+	local := make([]time.Duration, 0, reads)
+	for index := 0; index < reads; index++ {
+		operationStart := time.Now()
+		if _, err := target.accounts.FindByID(ctx, accountID); err != nil {
+			t.Errorf("%s: concurrent read failed: %v", target.name, err)
+			return local
+		}
+		local = append(local, time.Since(operationStart))
+	}
+	return local
+}
+
 func deltaVersus(baseline time.Duration, current time.Duration) string {
 	if baseline == 0 {
 		return "-"
@@ -301,65 +335,78 @@ func deltaVersus(baseline time.Duration, current time.Duration) string {
 	return fmt.Sprintf("%.1f%%", difference)
 }
 
-// round3 corta a precisão pra tabela ficar legível — nanossegundo em
-// medição de round-trip de banco é ruído, não informação.
+// round3 rounds to the microsecond: nanoseconds in a database round-trip
+// measurement are noise, not information.
 func round3(duration time.Duration) string {
 	return duration.Round(time.Microsecond).String()
 }
-
-// --- Fixtures ------------------------------------------------------------
 
 func prepareFixtures(ctx context.Context, t *testing.T, target implementation, ownerID uuid.UUID) fixtures {
 	t.Helper()
 
 	preparedAccount := newAccount(t, ownerID)
 	if err := target.accounts.Save(ctx, preparedAccount); err != nil {
-		t.Fatalf("%s: falha preparando conta: %v", target.name, err)
+		t.Fatalf("%s: failed to prepare the account: %v", target.name, err)
 	}
 
 	preparedTransaction := newTransaction(t, ownerID, preparedAccount.ID())
 	if err := target.transactions.Save(ctx, preparedTransaction); err != nil {
-		t.Fatalf("%s: falha preparando transação: %v", target.name, err)
+		t.Fatalf("%s: failed to prepare the transaction: %v", target.name, err)
 	}
 
 	preparedCategory := newCategory(t, ownerID)
 	if err := target.categories.Save(ctx, preparedCategory); err != nil {
-		t.Fatalf("%s: falha preparando categoria: %v", target.name, err)
+		t.Fatalf("%s: failed to prepare the category: %v", target.name, err)
 	}
 
 	return fixtures{account: preparedAccount, transaction: preparedTransaction, category: preparedCategory}
 }
 
+// warmUp keeps startup out of the measurement: the first query prepares the
+// statement on the server, the first connection does the handshake and Ent
+// initializes its metadata.
 func warmUp(ctx context.Context, t *testing.T, target implementation, prepared fixtures) {
 	t.Helper()
 
-	for index := 0; index < 50; index++ {
+	for index := 0; index < warmUpReads; index++ {
 		if _, err := target.accounts.FindByID(ctx, prepared.account.ID()); err != nil {
-			t.Fatalf("%s: aquecimento falhou: %v", target.name, err)
+			t.Fatalf("%s: warm-up failed: %v", target.name, err)
 		}
 		if _, err := target.transactions.FindByID(ctx, prepared.transaction.ID()); err != nil {
-			t.Fatalf("%s: aquecimento falhou: %v", target.name, err)
+			t.Fatalf("%s: warm-up failed: %v", target.name, err)
 		}
 		if _, err := target.categories.FindByID(ctx, prepared.category.ID()); err != nil {
-			t.Fatalf("%s: aquecimento falhou: %v", target.name, err)
+			t.Fatalf("%s: warm-up failed: %v", target.name, err)
 		}
 	}
+}
+
+func mustBenchmarkUserID(t *testing.T, ownerID uuid.UUID) shared.UserID {
+	t.Helper()
+
+	userID, err := shared.NewUserID(ownerID)
+	if err != nil {
+		t.Fatalf("invalid user id: %v", err)
+	}
+	return userID
+}
+
+func mustBenchmarkCurrency(t *testing.T) shared.Currency {
+	t.Helper()
+
+	currency, err := shared.NewCurrency("BRL")
+	if err != nil {
+		t.Fatalf("invalid currency: %v", err)
+	}
+	return currency
 }
 
 func newAccount(t *testing.T, ownerID uuid.UUID) *account.Account {
 	t.Helper()
 
-	userID, err := shared.NewUserID(ownerID)
+	created, err := account.New(mustBenchmarkUserID(t, ownerID), "Benchmark Account", account.KindChecking, mustBenchmarkCurrency(t), account.NewManualSource())
 	if err != nil {
-		t.Fatalf("userID inválido: %v", err)
-	}
-	currency, err := shared.NewCurrency("BRL")
-	if err != nil {
-		t.Fatalf("moeda inválida: %v", err)
-	}
-	created, err := account.New(userID, "Conta de Benchmark", account.KindChecking, currency, account.NewManualSource())
-	if err != nil {
-		t.Fatalf("conta inválida: %v", err)
+		t.Fatalf("invalid account: %v", err)
 	}
 	return created
 }
@@ -367,21 +414,13 @@ func newAccount(t *testing.T, ownerID uuid.UUID) *account.Account {
 func newTransaction(t *testing.T, ownerID uuid.UUID, accountID account.AccountID) *transaction.Transaction {
 	t.Helper()
 
-	userID, err := shared.NewUserID(ownerID)
+	money, err := shared.NewMoney(-4550, mustBenchmarkCurrency(t))
 	if err != nil {
-		t.Fatalf("userID inválido: %v", err)
+		t.Fatalf("invalid amount: %v", err)
 	}
-	currency, err := shared.NewCurrency("BRL")
+	created, err := transaction.NewManual(mustBenchmarkUserID(t, ownerID), accountID, money, time.Now().Add(-time.Hour), "Benchmark")
 	if err != nil {
-		t.Fatalf("moeda inválida: %v", err)
-	}
-	money, err := shared.NewMoney(-4550, currency)
-	if err != nil {
-		t.Fatalf("quantia inválida: %v", err)
-	}
-	created, err := transaction.NewManual(userID, accountID, money, time.Now().Add(-time.Hour), "Benchmark")
-	if err != nil {
-		t.Fatalf("transação inválida: %v", err)
+		t.Fatalf("invalid transaction: %v", err)
 	}
 	return created
 }
@@ -389,22 +428,24 @@ func newTransaction(t *testing.T, ownerID uuid.UUID, accountID account.AccountID
 func newCategory(t *testing.T, ownerID uuid.UUID) *category.Category {
 	t.Helper()
 
-	userID, err := shared.NewUserID(ownerID)
+	created, err := category.New(mustBenchmarkUserID(t, ownerID), "Benchmark Category", nil)
 	if err != nil {
-		t.Fatalf("userID inválido: %v", err)
-	}
-	created, err := category.New(userID, "Categoria de Benchmark", nil)
-	if err != nil {
-		t.Fatalf("categoria inválida: %v", err)
+		t.Fatalf("invalid category: %v", err)
 	}
 	for index := 0; index < rulesPerCategory; index++ {
-		rule, err := category.NewCategoryRule(fmt.Sprintf("keyword-%d", index))
-		if err != nil {
-			t.Fatalf("regra inválida: %v", err)
-		}
-		if err := created.AddRule(rule); err != nil {
-			t.Fatalf("falha adicionando regra: %v", err)
-		}
+		addBenchmarkRule(t, created, fmt.Sprintf("keyword-%d", index))
 	}
 	return created
+}
+
+func addBenchmarkRule(t *testing.T, target *category.Category, keyword string) {
+	t.Helper()
+
+	rule, err := category.NewCategoryRule(keyword)
+	if err != nil {
+		t.Fatalf("invalid rule: %v", err)
+	}
+	if err := target.AddRule(rule); err != nil {
+		t.Fatalf("failed to add the rule: %v", err)
+	}
 }

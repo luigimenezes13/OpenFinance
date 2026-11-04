@@ -1,9 +1,8 @@
 //go:build integration
 
-// Testes de integração do repositório de usuários: Postgres real, com as
-// migrations GERADAS deste bounded context aplicadas.
-//
-// Como rodar: make test-integration
+// Integration tests for the user repository: a real Postgres with the
+// migrations generated for this bounded context applied. Run them with
+// `make test-integration`.
 package entrepo_test
 
 import (
@@ -26,32 +25,34 @@ var (
 	testClient *ent.Client
 )
 
-// Só as migrations DESTE bounded context — o Identity não conhece nem
-// depende das tabelas do Financial Tracking.
 const migrationsDir = "../../../../migrations/identity"
 
 func TestMain(main *testing.M) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
-		fmt.Println("TEST_DATABASE_URL vazio — use `make test-integration`")
+		fmt.Println("TEST_DATABASE_URL is empty, use `make test-integration`")
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
 	database, err := db.NewSQLDB(ctx, databaseURL)
 	if err != nil {
-		fmt.Printf("falha conectando no Postgres de teste: %v\n", err)
+		fmt.Printf("failed to connect to the test Postgres: %v\n", err)
 		os.Exit(1)
 	}
 	testDB = database
 	testClient = entrepo.NewClient(database)
 
 	if err := resetSchema(ctx, database); err != nil {
-		fmt.Printf("falha resetando schema: %v\n", err)
+		fmt.Printf("failed to reset the schema: %v\n", err)
 		os.Exit(1)
 	}
 	if err := applyMigrations(ctx, database); err != nil {
-		fmt.Printf("falha aplicando migrations: %v\n", err)
+		fmt.Printf("failed to apply migrations: %v\n", err)
+		os.Exit(1)
+	}
+	if err := createProbeDeliveries(ctx, database); err != nil {
+		fmt.Printf("failed to create the probe deliveries table: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -60,65 +61,57 @@ func TestMain(main *testing.M) {
 	os.Exit(code)
 }
 
-// resetSchema derruba APENAS as tabelas deste bounded context, para as
-// migrations serem aplicadas em base limpa.
-//
-// Derrubar só o que é nosso (em vez de `DROP SCHEMA public`) é obrigatório
-// aqui: o banco de teste é compartilhado com o Financial Tracking e o
-// `go test ./...` roda os packages em PARALELO, então um drop amplo apagaria
-// as tabelas do outro BC no meio dos testes dele.
+// resetSchema drops ONLY the tables owned by this bounded context so the
+// migrations run on a clean base. A broad `DROP SCHEMA public` is not an
+// option: the test database is shared with Financial Tracking and
+// `go test ./...` runs packages in parallel, so it would wipe the other
+// context's tables in the middle of its tests.
 func resetSchema(ctx context.Context, database *sql.DB) error {
-	_, err := database.ExecContext(ctx, `DROP TABLE IF EXISTS users CASCADE`)
+	_, err := database.ExecContext(ctx, `DROP TABLE IF EXISTS users, `+probeDeliveriesTable+` CASCADE`)
 	return err
 }
 
-// applyMigrations executa os .sql versionados deste BC, em ordem.
-//
-// NENHUM erro é tolerado: se uma migration falha, o teste falha. A versão
-// anterior engolia erro de "objeto já existe" por comparação de SUBSTRING na
-// mensagem, o que era frágil por dois motivos — mascarava falhas reais de
-// migration, e mensagem de erro do Postgres é localizável, então a
-// comparação depende do idioma do servidor. A tolerância existia só porque o
-// harness não limpava antes; com o resetSchema acima, ela deixa de ser
-// necessária.
-//
-// Efeito colateral bom: migration NOVA passa a ser aplicada em banco de
-// teste antigo. Com a tolerância, um banco que já tivesse `users` pularia o
-// ALTER de uma migration posterior e os testes rodariam contra um schema
-// desatualizado.
+// applyMigrations runs this context's versioned .sql files in order and
+// tolerates NO error. Swallowing "already exists" errors by matching message
+// substrings would mask real migration failures, depend on the server locale,
+// and let an old test database skip the ALTER of a newer migration, so tests
+// would run against a stale schema. Atlas file names start with a timestamp,
+// so lexicographic order is chronological order.
 func applyMigrations(ctx context.Context, database *sql.DB) error {
 	entries, err := os.ReadDir(migrationsDir)
 	if err != nil {
-		return fmt.Errorf("lendo migrations: %w", err)
+		return fmt.Errorf("reading migrations: %w", err)
 	}
 
+	files := sqlFileNames(entries)
+	sort.Strings(files)
+
+	for _, file := range files {
+		statements, err := os.ReadFile(filepath.Join(migrationsDir, file))
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", file, err)
+		}
+		if _, err := database.ExecContext(ctx, string(statements)); err != nil {
+			return fmt.Errorf("executing %s: %w", file, err)
+		}
+	}
+	return nil
+}
+
+func sqlFileNames(entries []os.DirEntry) []string {
 	files := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), ".sql") {
 			files = append(files, entry.Name())
 		}
 	}
-	// Nome de arquivo do Atlas começa com timestamp, então ordem
-	// lexicográfica é ordem cronológica.
-	sort.Strings(files)
-
-	for _, file := range files {
-		statements, err := os.ReadFile(filepath.Join(migrationsDir, file))
-		if err != nil {
-			return fmt.Errorf("lendo %s: %w", file, err)
-		}
-		if _, err := database.ExecContext(ctx, string(statements)); err != nil {
-			return fmt.Errorf("executando %s: %w", file, err)
-		}
-	}
-	return nil
+	return files
 }
 
-// truncateUsers limpa as linhas antes de cada teste.
 func truncateUsers(t *testing.T) {
 	t.Helper()
 
-	if _, err := testDB.ExecContext(context.Background(), `TRUNCATE users`); err != nil {
-		t.Fatalf("falha truncando users: %v", err)
+	if _, err := testDB.ExecContext(context.Background(), `TRUNCATE users, `+probeDeliveriesTable); err != nil {
+		t.Fatalf("failed to truncate tables: %v", err)
 	}
 }

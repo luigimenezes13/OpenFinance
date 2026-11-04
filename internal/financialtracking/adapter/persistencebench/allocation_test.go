@@ -13,31 +13,14 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 )
 
-// newBenchmarkCurrency e newBenchmarkUserID existem porque os builders dos
-// testes de latência recebem *testing.T, e benchmark usa *testing.B.
-func newBenchmarkCurrency() (shared.Currency, error) {
-	return shared.NewCurrency("BRL")
-}
-
-func newBenchmarkUserID(raw uuid.UUID) (shared.UserID, error) {
-	return shared.NewUserID(raw)
-}
-
-// Os benchmarks abaixo medem a dimensão que a tabela de latência NÃO
-// mostra: quanto de MEMÓRIA e quantas alocações cada camada gasta por
-// operação.
+// benchmarkFind measures the memory and allocations each layer spends on the
+// hottest read, which the latency table does not show. Latency of a database
+// operation is dominated by the round-trip, so the Go layer almost vanishes in
+// the mean; allocation belongs entirely to the layer, scales with request rate
+// and comes back as GC pressure in the tail. It takes the minimal accountStore
+// instead of the full port because only FindByID is measured.
 //
-// Por que isso importa mais que a latência: a latência de uma operação de
-// banco é dominada pelo round-trip, então a camada Go quase desaparece na
-// média. Alocação, não — ela é toda da camada, escala com a taxa de
-// requisições e reaparece depois como pressão de GC (que aí sim vira
-// latência, na cauda, no pior momento).
-//
-// Rodar com: go test -tags bench -bench BenchmarkFind -benchmem -run '^$'
-
-// benchmarkFind mede a leitura mais quente do sistema. Recebe a interface
-// mínima (accountStore), não a porta completa: o benchmark mede FindByID e
-// não tem por que exigir os métodos de listagem.
+// Run with: go test -tags bench -bench BenchmarkFind -benchmem -run '^$'
 func benchmarkFind(b *testing.B, repository accountStore, accountID account.AccountID) {
 	ctx := context.Background()
 
@@ -46,34 +29,30 @@ func benchmarkFind(b *testing.B, repository accountStore, accountID account.Acco
 
 	for index := 0; index < b.N; index++ {
 		if _, err := repository.FindByID(ctx, accountID); err != nil {
-			b.Fatalf("leitura falhou: %v", err)
+			b.Fatalf("read failed: %v", err)
 		}
 	}
 }
 
-// prepareBenchmarkAccount grava uma conta e devolve o id.
 func prepareBenchmarkAccount(b *testing.B) account.AccountID {
 	b.Helper()
 
-	ctx := context.Background()
-	userID := uuid.New()
-
-	currency, err := newBenchmarkCurrency()
+	currency, err := shared.NewCurrency("BRL")
 	if err != nil {
-		b.Fatalf("moeda inválida: %v", err)
+		b.Fatalf("invalid currency: %v", err)
 	}
-	domainUserID, err := newBenchmarkUserID(userID)
+	userID, err := shared.NewUserID(uuid.New())
 	if err != nil {
-		b.Fatalf("userID inválido: %v", err)
+		b.Fatalf("invalid user id: %v", err)
 	}
-	created, err := account.New(domainUserID, "Conta de Benchmark", account.KindChecking, currency, account.NewManualSource())
+	created, err := account.New(userID, "Benchmark Account", account.KindChecking, currency, account.NewManualSource())
 	if err != nil {
-		b.Fatalf("conta inválida: %v", err)
+		b.Fatalf("invalid account: %v", err)
 	}
 
-	repository := entrepo.NewAccountRepository(benchClient)
-	if err := repository.Save(ctx, created); err != nil {
-		b.Fatalf("falha preparando conta: %v", err)
+	repository := entrepo.NewAccountRepository(benchClient, newUnsubscribedWriter(b))
+	if err := repository.Save(context.Background(), created); err != nil {
+		b.Fatalf("failed to prepare the account: %v", err)
 	}
 	return created.ID()
 }
@@ -90,5 +69,5 @@ func BenchmarkFindSQLDB(b *testing.B) {
 
 func BenchmarkFindEnt(b *testing.B) {
 	accountID := prepareBenchmarkAccount(b)
-	benchmarkFind(b, entrepo.NewAccountRepository(benchClient), accountID)
+	benchmarkFind(b, entrepo.NewAccountRepository(benchClient, newUnsubscribedWriter(b)), accountID)
 }

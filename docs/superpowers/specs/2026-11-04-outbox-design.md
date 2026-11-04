@@ -121,7 +121,7 @@ Semântica `Required`: se o ctx já carrega tx, `Run` se junta a ela em vez de a
 
 ### Repositórios gravam os eventos
 
-`Save` de `Account`, `Transaction`, `Category` e `User`:
+`Save` de `Account`, `Transaction` e `User` (o `Category` não emite eventos; o `Save` dele só passa a usar o `UnitOfWork` no lugar do `withTx`):
 
 ```
 withTx(ctx) {
@@ -166,7 +166,8 @@ type Envelope struct {
 
 ## 7. Entrega: River como fila
 
-- **Um job kind só**: `outbox_delivery`, args `{subscriber, envelope}`. Unique por args (`ByArgs`), então gravar o mesmo evento duas vezes é no-op.
+- **Um job kind só**: `outbox_delivery`, args `{subscriber, event_id, event_name, event_version, occurred_at, payload}`. Único por `(subscriber, event_id)` (`ByArgs` com `river:"unique"` nesses dois campos), então enfileirar a mesma entrega duas vezes é no-op.
+- Os args ficam em `jsonb`: o assinante recebe o payload com o mesmo conteúdo, mas sem garantia de ordem de chaves nem espaçamento. Consumidor compara JSON por conteúdo, nunca por bytes.
 - **Fan-out no `Record`**: para cada assinante registrado no nome do evento, um job (`InsertManyTx` na `*sql.Tx` do ctx). Evento sem assinante não gera job.
 - **`DeliveryWorker`** (`river.Worker[DeliveryArgs]`) resolve o assinante pelo nome e chama `Handle(ctx, Envelope)`. Assinante desconhecido no momento da entrega → `river.JobCancel` (assinante foi removido do código).
 - **Assinante** tem nome estável (ex.: `log.domain_event`): é parte do args e da unicidade; renomear vira assinante novo.
@@ -209,3 +210,4 @@ Testes novos em inglês, com subtestes `t.Run("should ...")`. Os arquivos de tes
 | Data | Mudança |
 |---|---|
 | 2026-11-04 | Versão inicial. Desenho fechado após pesquisa em código (Three Dots Labs, go-ddd, trm, kratos, Ent, River, watermill-sql e libs de outbox). Duas revisões em relação à primeira proposta: (1) Unit of Work deixou de ser o caminho único — o repositório grava aggregate + eventos, e o UoW fica para o use case com vários aggregates; (2) o worker próprio com tabelas `outbox_events`/`outbox_deliveries` foi trocado pelo River, com um job por (evento, assinante). |
+| 2026-11-04 | Etapa 3. Unicidade do job restrita a `(subscriber, event_id)`. Registrado que o payload passa por `jsonb`. `Category` fora da lista de aggregates com eventos. Escrita do aggregate + eventos encapsulada em `outbox.AggregateWriter`. Testes de repositório provam a atomicidade com uma fila de prova na mesma tx; a fila real do River é provada no pacote `outbox`, num schema próprio. |

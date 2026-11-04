@@ -7,24 +7,28 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent"
 	enttransaction "github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/transaction"
 	domaintransaction "github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
 // TransactionRepository implementa transaction.Repository.
 type TransactionRepository struct {
 	client *ent.Client
+	writer *outbox.AggregateWriter
 }
 
 var _ domaintransaction.Repository = (*TransactionRepository)(nil)
 
-// NewTransactionRepository injeta o client por construtor.
-func NewTransactionRepository(client *ent.Client) *TransactionRepository {
-	return &TransactionRepository{client: client}
+func NewTransactionRepository(client *ent.Client, writer *outbox.AggregateWriter) *TransactionRepository {
+	return &TransactionRepository{client: client, writer: writer}
 }
 
-// Save persiste a transação (upsert por id).
 func (r *TransactionRepository) Save(ctx context.Context, target *domaintransaction.Transaction) error {
-	snapshot := target.Snapshot()
+	return r.writer.Write(ctx, target, func(ctx context.Context) error {
+		return r.upsert(ctx, target.Snapshot())
+	})
+}
 
+func (r *TransactionRepository) upsert(ctx context.Context, snapshot domaintransaction.TransactionSnapshot) error {
 	builder := r.client.Transaction.Create().
 		SetID(snapshot.ID).
 		SetUserID(snapshot.UserID).

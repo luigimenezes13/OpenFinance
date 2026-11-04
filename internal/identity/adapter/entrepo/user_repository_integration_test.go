@@ -11,14 +11,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 )
+
+const rawUserInsert = `
+INSERT INTO users (id, email, name, external_provider, external_subject, registered_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, now(), now(), now())`
+
+type impossibleUser struct {
+	name     string
+	email    string
+	userName string
+	provider string
+	subject  string
+}
+
+func impossibleUsers() []impossibleUser {
+	return []impossibleUser{
+		{name: "should reject a blank email", email: "   ", userName: "Luigi", provider: "google", subject: "sub-1"},
+		{name: "should reject a blank name", email: "luigi@example.com", userName: "  ", provider: "google", subject: "sub-2"},
+		{name: "should reject a blank provider", email: "luigi@example.com", userName: "Luigi", provider: "", subject: "sub-3"},
+		{name: "should reject a blank subject", email: "luigi@example.com", userName: "Luigi", provider: "google", subject: "   "},
+	}
+}
 
 func mustUser(t *testing.T, email string, subject string) *identity.User {
 	t.Helper()
 
-	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/foto.jpg")
+	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/photo.jpg")
 	require.NoError(t, err)
 	return mustUserWithAvatar(t, email, subject, avatar)
 }
@@ -35,203 +55,153 @@ func mustUserWithAvatar(t *testing.T, email string, subject string, avatar ident
 	return registered
 }
 
-// TestIntegrationUserRepositoryRoundTrip cobre ida e volta pelas duas
-// consultas da porta.
-func TestIntegrationUserRepositoryRoundTrip(t *testing.T) {
-	truncateUsers(t)
+func TestUserRepositoryIntegration(t *testing.T) {
 	ctx := context.Background()
 
-	repository := entrepo.NewUserRepository(testClient)
-	original := mustUser(t, "luigi@example.com", "google-sub-123")
+	t.Run("should round-trip the user through both port queries, including the login lookup by external identity", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
+		original := mustUser(t, "luigi@example.com", "google-sub-123")
 
-	require.NoError(t, repository.Save(ctx, original))
+		require.NoError(t, repository.Save(ctx, original))
 
-	byID, err := repository.FindByID(ctx, original.ID())
-	require.NoError(t, err)
+		byID, err := repository.FindByID(ctx, original.ID())
+		require.NoError(t, err)
 
-	originalSnapshot := original.Snapshot()
-	foundSnapshot := byID.Snapshot()
-	assert.Equal(t, originalSnapshot.ID, foundSnapshot.ID)
-	assert.Equal(t, "luigi@example.com", foundSnapshot.Email)
-	assert.Equal(t, "Luigi", foundSnapshot.Name)
-	assert.Equal(t, "https://lh3.googleusercontent.com/a/foto.jpg", foundSnapshot.AvatarURL)
-	assert.Equal(t, identity.ProviderGoogle, foundSnapshot.ExternalProvider)
-	assert.Equal(t, "google-sub-123", foundSnapshot.ExternalSubject)
-	assert.WithinDuration(t, originalSnapshot.RegisteredAt, foundSnapshot.RegisteredAt, time.Millisecond)
-	assert.Empty(t, byID.Events(), "rehidratar não emite Registered")
+		originalSnapshot := original.Snapshot()
+		foundSnapshot := byID.Snapshot()
+		assert.Equal(t, originalSnapshot.ID, foundSnapshot.ID)
+		assert.Equal(t, "luigi@example.com", foundSnapshot.Email)
+		assert.Equal(t, "Luigi", foundSnapshot.Name)
+		assert.Equal(t, "https://lh3.googleusercontent.com/a/photo.jpg", foundSnapshot.AvatarURL)
+		assert.Equal(t, identity.ProviderGoogle, foundSnapshot.ExternalProvider)
+		assert.Equal(t, "google-sub-123", foundSnapshot.ExternalSubject)
+		assert.WithinDuration(t, originalSnapshot.RegisteredAt, foundSnapshot.RegisteredAt, time.Millisecond)
+		assert.Empty(t, byID.Events(), "rehydrating does not emit Registered")
 
-	// A consulta do login.
-	byExternal, err := repository.FindByExternalIdentity(ctx, original.ExternalIdentity())
-	require.NoError(t, err)
-	assert.True(t, byExternal.ID().Equals(original.ID()))
-}
+		byExternal, err := repository.FindByExternalIdentity(ctx, original.ExternalIdentity())
+		require.NoError(t, err)
+		assert.True(t, byExternal.ID().Equals(original.ID()))
+	})
 
-// TestIntegrationUserRepositoryPrimeiroAcesso: ausência vira ErrNotFound
-// limpo, que é o sinal de "primeiro acesso" para o use case.
-func TestIntegrationUserRepositoryPrimeiroAcesso(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+	t.Run("should signal a first access with a clean not found error", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
+		external, err := identity.NewExternalIdentity(identity.ProviderGoogle, "unknown")
+		require.NoError(t, err)
 
-	repository := entrepo.NewUserRepository(testClient)
-	external, err := identity.NewExternalIdentity(identity.ProviderGoogle, "desconhecido")
-	require.NoError(t, err)
+		found, err := repository.FindByExternalIdentity(ctx, external)
 
-	found, err := repository.FindByExternalIdentity(ctx, external)
+		require.ErrorIs(t, err, identity.ErrNotFound)
+		assert.Nil(t, found)
 
-	require.ErrorIs(t, err, identity.ErrNotFound)
-	assert.Nil(t, found)
+		missingID, err := identity.UserIDFromUUID(uuid.New())
+		require.NoError(t, err)
+		found, err = repository.FindByID(ctx, missingID)
+		require.ErrorIs(t, err, identity.ErrNotFound)
+		assert.Nil(t, found)
+	})
 
-	missingID, err := identity.UserIDFromUUID(uuid.New())
-	require.NoError(t, err)
-	found, err = repository.FindByID(ctx, missingID)
-	require.ErrorIs(t, err, identity.ErrNotFound)
-	assert.Nil(t, found)
-}
+	t.Run("should upsert the profile while preserving the external anchor and the registration instant", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
+		target := mustUser(t, "luigi@example.com", "google-sub-123")
+		require.NoError(t, repository.Save(ctx, target))
+		registeredAtBefore := target.Snapshot().RegisteredAt
 
-// TestIntegrationUserRepositorySyncProfile prova que o upsert atualiza o
-// PERFIL e preserva o que é imutável: a âncora e o instante do registro.
-func TestIntegrationUserRepositorySyncProfile(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+		newEmail, err := identity.NewEmail("new@example.com")
+		require.NoError(t, err)
+		changed, err := target.SyncProfile(newEmail, "Luigi Menezes", target.Avatar())
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.NoError(t, repository.Save(ctx, target))
 
-	repository := entrepo.NewUserRepository(testClient)
-	target := mustUser(t, "luigi@example.com", "google-sub-123")
-	require.NoError(t, repository.Save(ctx, target))
-	registeredAtBefore := target.Snapshot().RegisteredAt
+		found, err := repository.FindByID(ctx, target.ID())
+		require.NoError(t, err)
 
-	newEmail, err := identity.NewEmail("novo@example.com")
-	require.NoError(t, err)
-	changed, err := target.SyncProfile(newEmail, "Luigi Menezes", target.Avatar())
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.NoError(t, repository.Save(ctx, target))
+		foundSnapshot := found.Snapshot()
+		assert.Equal(t, "new@example.com", foundSnapshot.Email)
+		assert.Equal(t, "Luigi Menezes", foundSnapshot.Name)
+		assert.Equal(t, "google-sub-123", foundSnapshot.ExternalSubject, "the anchor does not change")
+		assert.WithinDuration(t, registeredAtBefore, foundSnapshot.RegisteredAt, time.Millisecond,
+			"registered_at is Immutable in the schema")
 
-	found, err := repository.FindByID(ctx, target.ID())
-	require.NoError(t, err)
+		var rowCount int
+		require.NoError(t, testDB.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&rowCount))
+		assert.Equal(t, 1, rowCount, "the upsert updates the row instead of inserting another")
+	})
 
-	foundSnapshot := found.Snapshot()
-	assert.Equal(t, "novo@example.com", foundSnapshot.Email)
-	assert.Equal(t, "Luigi Menezes", foundSnapshot.Name)
-	assert.Equal(t, "google-sub-123", foundSnapshot.ExternalSubject, "a âncora não muda")
-	assert.WithinDuration(t, registeredAtBefore, foundSnapshot.RegisteredAt, time.Millisecond,
-		"registered_at é Immutable no schema")
+	t.Run("should reject a second local user for the same provider subject so racing first logins cannot create two", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
+		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
 
-	var rowCount int
-	require.NoError(t, testDB.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&rowCount))
-	assert.Equal(t, 1, rowCount, "upsert atualiza a linha, não insere outra")
-}
+		duplicate := mustUser(t, "other@example.com", "google-sub-123")
+		err := repository.Save(ctx, duplicate)
 
-// TestIntegrationUserRepositorySubjectUnico é a proteção contra corrida de
-// primeiro acesso: dois logins simultâneos do MESMO Google não podem criar
-// dois usuários locais, senão o login seguinte devolveria um deles ao acaso.
-func TestIntegrationUserRepositorySubjectUnico(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+		require.Error(t, err, "the unique (provider, subject) index must reject it")
+	})
 
-	repository := entrepo.NewUserRepository(testClient)
-	require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
+	t.Run("should accept the same email for different subjects because identity is the provider subject, not the email", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
+		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
+		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-999")))
 
-	duplicate := mustUser(t, "outro@example.com", "google-sub-123")
-	err := repository.Save(ctx, duplicate)
+		var rowCount int
+		require.NoError(t, testDB.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&rowCount))
+		assert.Equal(t, 2, rowCount)
+	})
 
-	require.Error(t, err, "o índice único (provider, subject) tem que recusar")
-}
+	t.Run("should keep the schema CHECK constraints guarding raw SQL writes that bypass the domain", func(t *testing.T) {
+		truncateUsers(t)
 
-// TestIntegrationUserRepositoryEmailNaoEhUnico documenta a decisão: a
-// identidade é (provedor, subject), não e-mail. Com um segundo provedor no
-// futuro, a mesma pessoa pode aparecer com o mesmo endereço em dois logins
-// distintos, e um unique aqui recusaria cadastro legítimo.
-func TestIntegrationUserRepositoryEmailNaoEhUnico(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+		for _, testCase := range impossibleUsers() {
+			t.Run(testCase.name, func(t *testing.T) {
+				_, err := testDB.ExecContext(ctx, rawUserInsert,
+					uuid.New(), testCase.email, testCase.userName, testCase.provider, testCase.subject)
 
-	repository := entrepo.NewUserRepository(testClient)
-	require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
-	require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-999")))
+				require.Error(t, err, "the schema must reject this state")
+			})
+		}
+	})
 
-	var rowCount int
-	require.NoError(t, testDB.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&rowCount))
-	assert.Equal(t, 2, rowCount)
-}
+	t.Run("should store a missing avatar as an empty string, not NULL, and overwrite it through the upsert", func(t *testing.T) {
+		truncateUsers(t)
+		repository := newUserRepository(t)
 
-// TestIntegrationUsersSchemaRejectsImpossibleState valida por SQL cru que os
-// CHECKs declarados no schema do Ent chegaram ao banco.
-func TestIntegrationUsersSchemaRejectsImpossibleState(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+		withoutAvatar := mustUserWithAvatar(t, "no-photo@example.com", "google-sub-no-photo", identity.AvatarURL{})
+		require.NoError(t, repository.Save(ctx, withoutAvatar))
 
-	const rawInsert = `
-INSERT INTO users (id, email, name, external_provider, external_subject, registered_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, now(), now(), now())`
+		found, err := repository.FindByID(ctx, withoutAvatar.ID())
+		require.NoError(t, err)
+		assert.True(t, found.Avatar().IsZero())
 
-	cases := []struct {
-		name     string
-		email    string
-		userName string
-		provider string
-		subject  string
-	}{
-		{name: "e-mail em branco", email: "   ", userName: "Luigi", provider: "google", subject: "sub-1"},
-		{name: "nome em branco", email: "luigi@example.com", userName: "  ", provider: "google", subject: "sub-2"},
-		{name: "provedor em branco", email: "luigi@example.com", userName: "Luigi", provider: "", subject: "sub-3"},
-		{name: "subject em branco", email: "luigi@example.com", userName: "Luigi", provider: "google", subject: "   "},
-	}
+		var stored *string
+		storedID := withoutAvatar.ID()
+		require.NoError(t, testDB.QueryRowContext(ctx,
+			`SELECT avatar_url FROM users WHERE id = $1`, storedID.UUID()).Scan(&stored))
+		require.NotNil(t, stored, "NULL would add a third state with no meaning of its own")
+		assert.Empty(t, *stored)
 
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			_, err := testDB.ExecContext(ctx, rawInsert,
-				uuid.New(), testCase.email, testCase.userName, testCase.provider, testCase.subject)
+		avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/new.jpg")
+		require.NoError(t, err)
+		changed, err := found.SyncProfile(found.Email(), found.Name(), avatar)
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.NoError(t, repository.Save(ctx, found))
 
-			require.Error(t, err, "o schema tem que recusar este estado")
-		})
-	}
-}
+		reloaded, err := repository.FindByID(ctx, withoutAvatar.ID())
+		require.NoError(t, err)
+		assert.Equal(t, "https://lh3.googleusercontent.com/a/new.jpg", reloaded.Avatar().String())
 
-// TestIntegrationUserRepositoryAvatarOpcional cobre as duas pontas da coluna
-// de avatar: usuário sem foto (coluna com default vazio, não NULL) e remoção
-// da foto via upsert.
-func TestIntegrationUserRepositoryAvatarOpcional(t *testing.T) {
-	truncateUsers(t)
-	ctx := context.Background()
+		changed, err = reloaded.SyncProfile(reloaded.Email(), reloaded.Name(), identity.AvatarURL{})
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.NoError(t, repository.Save(ctx, reloaded))
 
-	repository := entrepo.NewUserRepository(testClient)
-
-	withoutAvatar := mustUserWithAvatar(t, "semfoto@example.com", "google-sub-sem-foto", identity.AvatarURL{})
-	require.NoError(t, repository.Save(ctx, withoutAvatar))
-
-	found, err := repository.FindByID(ctx, withoutAvatar.ID())
-	require.NoError(t, err)
-	assert.True(t, found.Avatar().IsZero())
-
-	// A coluna guarda string vazia, não NULL: "sem avatar" e "vazio" são a
-	// mesma coisa, e NULL só acrescentaria um terceiro estado sem
-	// significado próprio.
-	var stored *string
-	storedID := withoutAvatar.ID()
-	require.NoError(t, testDB.QueryRowContext(ctx,
-		`SELECT avatar_url FROM users WHERE id = $1`, storedID.UUID()).Scan(&stored))
-	require.NotNil(t, stored)
-	assert.Empty(t, *stored)
-
-	// Ganha uma foto...
-	avatar, err := identity.NewAvatarURL("https://lh3.googleusercontent.com/a/nova.jpg")
-	require.NoError(t, err)
-	changed, err := found.SyncProfile(found.Email(), found.Name(), avatar)
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.NoError(t, repository.Save(ctx, found))
-
-	reloaded, err := repository.FindByID(ctx, withoutAvatar.ID())
-	require.NoError(t, err)
-	assert.Equal(t, "https://lh3.googleusercontent.com/a/nova.jpg", reloaded.Avatar().String())
-
-	// ...e depois apaga no provedor.
-	changed, err = reloaded.SyncProfile(reloaded.Email(), reloaded.Name(), identity.AvatarURL{})
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.NoError(t, repository.Save(ctx, reloaded))
-
-	afterRemoval, err := repository.FindByID(ctx, withoutAvatar.ID())
-	require.NoError(t, err)
-	assert.True(t, afterRemoval.Avatar().IsZero(), "o upsert precisa sobrescrever com vazio")
+		afterRemoval, err := repository.FindByID(ctx, withoutAvatar.ID())
+		require.NoError(t, err)
+		assert.True(t, afterRemoval.Avatar().IsZero(), "the upsert must overwrite with empty")
+	})
 }

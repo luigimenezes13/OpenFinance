@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -91,4 +92,13 @@ func (m Mappers) Seal(event events.Event) (events.Envelope, error) {
 		OccurredAt: event.OccurredAt(),
 		Payload:    payload,
 	}, nil
+}
+
+func (m Mappers) EventNames() []string {
+	names := make([]string, 0, len(m.byEventName))
+	for name := range m.byEventName {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
