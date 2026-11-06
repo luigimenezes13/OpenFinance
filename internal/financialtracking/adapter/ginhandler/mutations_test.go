@@ -10,11 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRenameAccount cobre a renomeação e as recusas.
 func TestRenameAccount(t *testing.T) {
 	ownerID := uuid.New()
 
-	t.Run("caminho feliz", func(t *testing.T) {
+	t.Run("should answer 200 with the trimmed name", func(t *testing.T) {
 		target := newManualAccount(t, ownerID)
 		accountID := target.ID()
 		server := newTestServer(t, func(server *testServer) {
@@ -22,14 +21,14 @@ func TestRenameAccount(t *testing.T) {
 		})
 
 		recorder := server.request(t, http.MethodPatch, "/v1/accounts/"+accountID.String(), ownerID.String(),
-			map[string]any{"name": "  Nubank PJ  "})
+			map[string]any{"name": "  Nubank Business  "})
 
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		body := decode(t, recorder)
-		assert.Equal(t, "Nubank PJ", body["name"], "o aggregate normaliza o nome")
+		assert.Equal(t, "Nubank Business", body["name"], "the aggregate trims the name")
 	})
 
-	t.Run("nome em branco é recusado pelo domínio", func(t *testing.T) {
+	t.Run("should answer 422 for a blank name refused by the domain", func(t *testing.T) {
 		target := newManualAccount(t, ownerID)
 		accountID := target.ID()
 		server := newTestServer(t, func(server *testServer) {
@@ -41,10 +40,10 @@ func TestRenameAccount(t *testing.T) {
 
 		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 		assert.Equal(t, "invalid_account_name", errorCode(t, recorder))
-		assert.Equal(t, "Conta Corrente", target.Name(), "recusa não muta o aggregate")
+		assert.Equal(t, "Checking Account", target.Name(), "a refusal does not mutate the aggregate")
 	})
 
-	t.Run("conta de outro usuário", func(t *testing.T) {
+	t.Run("should answer 403 for an account of another user", func(t *testing.T) {
 		target := newManualAccount(t, ownerID)
 		accountID := target.ID()
 		server := newTestServer(t, func(server *testServer) {
@@ -52,85 +51,78 @@ func TestRenameAccount(t *testing.T) {
 		})
 
 		recorder := server.request(t, http.MethodPatch, "/v1/accounts/"+accountID.String(), uuid.New().String(),
-			map[string]any{"name": "Sequestrada"})
+			map[string]any{"name": "Hijacked"})
 
 		require.Equal(t, http.StatusForbidden, recorder.Code)
-		assert.Equal(t, "Conta Corrente", target.Name())
+		assert.Equal(t, "Checking Account", target.Name())
 	})
 }
 
-// TestCategoryRules cobre o ciclo completo de regras pela API — o
-// comportamento que existia no domínio e não tinha porta de entrada.
 func TestCategoryRules(t *testing.T) {
-	ownerID := uuid.New()
-	target := newCategoryFor(t, ownerID)
-	categoryID := target.ID()
-	server := newTestServer(t, func(server *testServer) {
-		server.categories = newFakeCategories(target)
+	t.Run("should add, refuse and remove rules through the API, exposing behavior the domain already had", func(t *testing.T) {
+		ownerID := uuid.New()
+		target := newCategoryFor(t, ownerID)
+		categoryID := target.ID()
+		server := newTestServer(t, func(server *testServer) {
+			server.categories = newFakeCategories(target)
+		})
+
+		rulesPath := fmt.Sprintf("/v1/categories/%s/rules", categoryID.String())
+
+		first := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "ifood"})
+		require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+
+		second := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "market"})
+		require.Equal(t, http.StatusCreated, second.Code)
+
+		body := decode(t, second)
+		rules := body["rules"].([]any)
+		require.Len(t, rules, 2, "the response returns the whole category, not only the created rule")
+
+		duplicate := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "ifood"})
+		require.Equal(t, http.StatusConflict, duplicate.Code, "a duplicate keyword is a conflict")
+		assert.Equal(t, "duplicate_category_rule", errorCode(t, duplicate))
+
+		blank := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "   "})
+		require.Equal(t, http.StatusUnprocessableEntity, blank.Code, "a blank keyword dies in the value object")
+		assert.Equal(t, "invalid_category_keyword", errorCode(t, blank))
+
+		firstRule := rules[0].(map[string]any)
+		ruleID := firstRule["id"].(string)
+		removed := server.request(t, http.MethodDelete, rulesPath+"/"+ruleID, ownerID.String(), nil)
+		require.Equal(t, http.StatusOK, removed.Code, removed.Body.String())
+		assert.Len(t, decode(t, removed)["rules"].([]any), 1, "the response shows the remaining rules")
+
+		again := server.request(t, http.MethodDelete, rulesPath+"/"+ruleID, ownerID.String(), nil)
+		require.Equal(t, http.StatusNotFound, again.Code, "removing the same rule again is 404")
+		assert.Equal(t, "category_rule_not_found", errorCode(t, again))
+
+		forbidden := server.request(t, http.MethodPost, rulesPath, uuid.New().String(), map[string]any{"keyword": "uber"})
+		assert.Equal(t, http.StatusForbidden, forbidden.Code, "another user cannot touch the category rules")
 	})
-
-	rulesPath := fmt.Sprintf("/v1/categories/%s/rules", categoryID.String())
-
-	// Cria duas regras.
-	first := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "ifood"})
-	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
-
-	second := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "mercado"})
-	require.Equal(t, http.StatusCreated, second.Code)
-
-	body := decode(t, second)
-	rules := body["rules"].([]any)
-	require.Len(t, rules, 2, "a resposta devolve a categoria inteira, não só a regra criada")
-
-	// Keyword duplicada é conflito.
-	duplicate := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "ifood"})
-	require.Equal(t, http.StatusConflict, duplicate.Code)
-	assert.Equal(t, "duplicate_category_rule", errorCode(t, duplicate))
-
-	// Keyword em branco morre no VO.
-	blank := server.request(t, http.MethodPost, rulesPath, ownerID.String(), map[string]any{"keyword": "   "})
-	require.Equal(t, http.StatusUnprocessableEntity, blank.Code)
-	assert.Equal(t, "invalid_category_keyword", errorCode(t, blank))
-
-	// Remove uma regra pelo id.
-	firstRule := rules[0].(map[string]any)
-	ruleID := firstRule["id"].(string)
-	removed := server.request(t, http.MethodDelete, rulesPath+"/"+ruleID, ownerID.String(), nil)
-	require.Equal(t, http.StatusOK, removed.Code, removed.Body.String())
-	assert.Len(t, decode(t, removed)["rules"].([]any), 1, "a resposta mostra o conjunto que sobrou")
-
-	// Remover de novo é 404.
-	again := server.request(t, http.MethodDelete, rulesPath+"/"+ruleID, ownerID.String(), nil)
-	require.Equal(t, http.StatusNotFound, again.Code)
-	assert.Equal(t, "category_rule_not_found", errorCode(t, again))
-
-	// Categoria de outro dono não deixa mexer nas regras.
-	forbidden := server.request(t, http.MethodPost, rulesPath, uuid.New().String(), map[string]any{"keyword": "uber"})
-	assert.Equal(t, http.StatusForbidden, forbidden.Code)
 }
 
-// TestRenameCategory cobre a renomeação.
 func TestRenameCategory(t *testing.T) {
-	ownerID := uuid.New()
-	target := newCategoryFor(t, ownerID)
-	categoryID := target.ID()
-	server := newTestServer(t, func(server *testServer) {
-		server.categories = newFakeCategories(target)
+	t.Run("should answer 200 with the new name", func(t *testing.T) {
+		ownerID := uuid.New()
+		target := newCategoryFor(t, ownerID)
+		categoryID := target.ID()
+		server := newTestServer(t, func(server *testServer) {
+			server.categories = newFakeCategories(target)
+		})
+
+		recorder := server.request(t, http.MethodPatch, "/v1/categories/"+categoryID.String(), ownerID.String(),
+			map[string]any{"name": "Meals"})
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "Meals", decode(t, recorder)["name"])
 	})
-
-	recorder := server.request(t, http.MethodPatch, "/v1/categories/"+categoryID.String(), ownerID.String(),
-		map[string]any{"name": "Comida"})
-
-	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-	assert.Equal(t, "Comida", decode(t, recorder)["name"])
 }
 
-// TestMoveCategory cobre as duas direções do movimento, incluindo o
-// `parent_id: null` que é PEDIDO EXPLÍCITO de virar raiz.
 func TestMoveCategory(t *testing.T) {
 	ownerID := uuid.New()
 
-	t.Run("vira subcategoria", func(t *testing.T) {
+	t.Run("should turn a root category into a subcategory", func(t *testing.T) {
 		parent := newCategoryFor(t, ownerID)
 		child := newCategoryFor(t, ownerID)
 		parentID := parent.ID()
@@ -146,7 +138,7 @@ func TestMoveCategory(t *testing.T) {
 		assert.Equal(t, parentID.String(), decode(t, recorder)["parent_id"])
 	})
 
-	t.Run("parent_id null volta a ser raiz", func(t *testing.T) {
+	t.Run("should turn a subcategory back into a root category, since a null parent_id is an explicit request", func(t *testing.T) {
 		parent := newCategoryFor(t, ownerID)
 		parentID := parent.ID()
 		child := newCategoryFor(t, ownerID)
@@ -164,7 +156,7 @@ func TestMoveCategory(t *testing.T) {
 		assert.Nil(t, decode(t, recorder)["parent_id"])
 	})
 
-	t.Run("pai de si mesma é recusado", func(t *testing.T) {
+	t.Run("should answer 422 for a category as its own parent", func(t *testing.T) {
 		target := newCategoryFor(t, ownerID)
 		categoryID := target.ID()
 		server := newTestServer(t, func(server *testServer) {

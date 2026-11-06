@@ -13,48 +13,63 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 )
 
-// TestCreateCategoryUseCase_Execute cobre a categoria RAIZ (sem pai).
-func TestCreateCategoryUseCase_Execute(t *testing.T) {
+func TestCreateCategory(t *testing.T) {
 	t.Parallel()
 
-	categories := newFakeCategories()
-	useCase := application.NewCreateCategoryUseCase(categories)
-	ownerID := uuid.New()
+	t.Run("should save a trimmed root category when no parent is given", func(t *testing.T) {
+		t.Parallel()
 
-	output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
-		UserID: ownerID,
-		Name:   "  Alimentação  ",
+		categories := newFakeCategories()
+		useCase := application.NewCreateCategoryUseCase(categories)
+		ownerID := uuid.New()
+
+		output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
+			UserID: ownerID,
+			Name:   "  Food  ",
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, ownerID.String(), output.UserID)
+		assert.Equal(t, "Food", output.Name)
+		assert.Nil(t, output.ParentID, "no parent means a root category")
+		require.Len(t, categories.saved, 1)
 	})
 
-	require.NoError(t, err)
-	assert.Equal(t, ownerID.String(), output.UserID)
-	assert.Equal(t, "Alimentação", output.Name)
-	assert.Nil(t, output.ParentID, "sem pai = categoria raiz")
-	require.Len(t, categories.saved, 1)
-}
+	t.Run("should save a subcategory and return the parent id as a string", func(t *testing.T) {
+		t.Parallel()
 
-// TestCreateCategoryUseCase_Execute_ComPai cobre a subcategoria: o ponteiro
-// do input vira VO e volta na saída como string.
-func TestCreateCategoryUseCase_Execute_ComPai(t *testing.T) {
-	t.Parallel()
+		categories := newFakeCategories()
+		useCase := application.NewCreateCategoryUseCase(categories)
+		parentID := uuid.New()
 
-	categories := newFakeCategories()
-	useCase := application.NewCreateCategoryUseCase(categories)
-	parentID := uuid.New()
+		output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
+			UserID:   uuid.New(),
+			Name:     "Restaurants",
+			ParentID: &parentID,
+		})
 
-	output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
-		UserID:   uuid.New(),
-		Name:     "Restaurantes",
-		ParentID: &parentID,
+		require.NoError(t, err)
+		require.NotNil(t, output.ParentID)
+		assert.Equal(t, parentID.String(), *output.ParentID)
 	})
 
-	require.NoError(t, err)
-	require.NotNil(t, output.ParentID)
-	assert.Equal(t, parentID.String(), *output.ParentID)
+	t.Run("should return the repository error as is", func(t *testing.T) {
+		t.Parallel()
+
+		categories := newFakeCategories()
+		categories.saveErr = errInfra
+		useCase := application.NewCreateCategoryUseCase(categories)
+
+		_, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
+			UserID: uuid.New(),
+			Name:   "Transport",
+		})
+
+		require.ErrorIs(t, err, errInfra)
+	})
 }
 
-// TestCreateCategoryUseCase_Execute_Recusa cobre os inputs inválidos.
-func TestCreateCategoryUseCase_Execute_Recusa(t *testing.T) {
+func TestCreateCategoryRefusal(t *testing.T) {
 	t.Parallel()
 
 	nilParent := uuid.Nil
@@ -65,18 +80,18 @@ func TestCreateCategoryUseCase_Execute_Recusa(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "usuário nil",
-			input:   application.CreateCategoryInput{UserID: uuid.Nil, Name: "Alimentação"},
+			name:    "should refuse a nil user",
+			input:   application.CreateCategoryInput{UserID: uuid.Nil, Name: "Food"},
 			wantErr: shared.ErrInvalidUserID,
 		},
 		{
-			name:    "nome vazio",
+			name:    "should refuse a blank name",
 			input:   application.CreateCategoryInput{UserID: uuid.New(), Name: ""},
 			wantErr: category.ErrInvalidName,
 		},
 		{
-			name:    "pai nil apontado",
-			input:   application.CreateCategoryInput{UserID: uuid.New(), Name: "Restaurantes", ParentID: &nilParent},
+			name:    "should refuse a nil parent id",
+			input:   application.CreateCategoryInput{UserID: uuid.New(), Name: "Restaurants", ParentID: &nilParent},
 			wantErr: category.ErrInvalidID,
 		},
 	}
@@ -94,21 +109,4 @@ func TestCreateCategoryUseCase_Execute_Recusa(t *testing.T) {
 			assert.Empty(t, categories.saved)
 		})
 	}
-}
-
-// TestCreateCategoryUseCase_Execute_PropagaErroDoRepositorio: erro de infra
-// sobe cru.
-func TestCreateCategoryUseCase_Execute_PropagaErroDoRepositorio(t *testing.T) {
-	t.Parallel()
-
-	categories := newFakeCategories()
-	categories.saveErr = errInfra
-	useCase := application.NewCreateCategoryUseCase(categories)
-
-	_, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
-		UserID: uuid.New(),
-		Name:   "Transporte",
-	})
-
-	require.ErrorIs(t, err, errInfra)
 }

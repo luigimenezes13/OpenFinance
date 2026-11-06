@@ -14,14 +14,12 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 )
 
-// TestRenameAccountUseCase cobre caminho feliz, recusa do domínio e
-// autorização.
-func TestRenameAccountUseCase(t *testing.T) {
+func TestRenameAccount(t *testing.T) {
 	t.Parallel()
 
 	ownerID := uuid.New()
 
-	t.Run("renomeia e persiste", func(t *testing.T) {
+	t.Run("should rename the account and save it", func(t *testing.T) {
 		t.Parallel()
 
 		target := newManualAccount(t, ownerID, "BRL")
@@ -30,15 +28,15 @@ func TestRenameAccountUseCase(t *testing.T) {
 		useCase := application.NewRenameAccountUseCase(accounts)
 
 		summary, err := useCase.Execute(context.Background(), application.RenameAccountInput{
-			UserID: ownerID, AccountID: accountID.UUID(), Name: "  Nubank PJ  ",
+			UserID: ownerID, AccountID: accountID.UUID(), Name: "  Nubank Business  ",
 		})
 
 		require.NoError(t, err)
-		assert.Equal(t, "Nubank PJ", summary.Name)
+		assert.Equal(t, "Nubank Business", summary.Name)
 		require.Len(t, accounts.saved, 1)
 	})
 
-	t.Run("nome inválido não muta nem persiste", func(t *testing.T) {
+	t.Run("should neither mutate nor save the account when the name is invalid", func(t *testing.T) {
 		t.Parallel()
 
 		target := newManualAccount(t, ownerID, "BRL")
@@ -51,11 +49,11 @@ func TestRenameAccountUseCase(t *testing.T) {
 		})
 
 		require.ErrorIs(t, err, account.ErrInvalidName)
-		assert.Equal(t, "Conta Corrente", target.Name())
+		assert.Equal(t, "Checking Account", target.Name())
 		assert.Empty(t, accounts.saved)
 	})
 
-	t.Run("conta de outro usuário", func(t *testing.T) {
+	t.Run("should refuse with ErrForbidden an account of another user", func(t *testing.T) {
 		t.Parallel()
 
 		target := newManualAccount(t, ownerID, "BRL")
@@ -64,7 +62,7 @@ func TestRenameAccountUseCase(t *testing.T) {
 		useCase := application.NewRenameAccountUseCase(accounts)
 
 		_, err := useCase.Execute(context.Background(), application.RenameAccountInput{
-			UserID: uuid.New(), AccountID: accountID.UUID(), Name: "Sequestrada",
+			UserID: uuid.New(), AccountID: accountID.UUID(), Name: "Hijacked",
 		})
 
 		require.ErrorIs(t, err, shared.ErrForbidden)
@@ -72,36 +70,38 @@ func TestRenameAccountUseCase(t *testing.T) {
 	})
 }
 
-// TestRenameCategoryUseCase cobre renomeação de categoria.
-func TestRenameCategoryUseCase(t *testing.T) {
+func TestRenameCategory(t *testing.T) {
 	t.Parallel()
 
-	ownerID := uuid.New()
-	target := newCategory(t, ownerID, "Alimentação")
-	categoryID := target.ID()
-	categories := newFakeCategories(target)
-	useCase := application.NewRenameCategoryUseCase(categories)
-
-	summary, err := useCase.Execute(context.Background(), application.RenameCategoryInput{
-		UserID: ownerID, CategoryID: categoryID.UUID(), Name: "Comida",
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, "Comida", summary.Name)
-	require.Len(t, categories.saved, 1)
-}
-
-// TestMoveCategoryUseCase cobre as duas direções e o auto-parentesco.
-func TestMoveCategoryUseCase(t *testing.T) {
-	t.Parallel()
-
-	ownerID := uuid.New()
-
-	t.Run("vira subcategoria", func(t *testing.T) {
+	t.Run("should rename the category and save it", func(t *testing.T) {
 		t.Parallel()
 
-		parent := newCategory(t, ownerID, "Alimentação")
-		child := newCategory(t, ownerID, "Restaurantes")
+		ownerID := uuid.New()
+		target := newCategory(t, ownerID, "Food")
+		categoryID := target.ID()
+		categories := newFakeCategories(target)
+		useCase := application.NewRenameCategoryUseCase(categories)
+
+		summary, err := useCase.Execute(context.Background(), application.RenameCategoryInput{
+			UserID: ownerID, CategoryID: categoryID.UUID(), Name: "Meals",
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, "Meals", summary.Name)
+		require.Len(t, categories.saved, 1)
+	})
+}
+
+func TestMoveCategory(t *testing.T) {
+	t.Parallel()
+
+	ownerID := uuid.New()
+
+	t.Run("should turn a root category into a subcategory", func(t *testing.T) {
+		t.Parallel()
+
+		parent := newCategory(t, ownerID, "Food")
+		child := newCategory(t, ownerID, "Restaurants")
 		parentID := parent.ID()
 		childID := child.ID()
 		rawParent := parentID.UUID()
@@ -116,12 +116,12 @@ func TestMoveCategoryUseCase(t *testing.T) {
 		assert.Equal(t, parentID.String(), *summary.ParentID)
 	})
 
-	t.Run("nil volta a ser raiz", func(t *testing.T) {
+	t.Run("should turn a subcategory back into a root category when the parent is nil", func(t *testing.T) {
 		t.Parallel()
 
-		parent := newCategory(t, ownerID, "Alimentação")
+		parent := newCategory(t, ownerID, "Food")
 		parentID := parent.ID()
-		child := newCategory(t, ownerID, "Restaurantes")
+		child := newCategory(t, ownerID, "Restaurants")
 		require.NoError(t, child.MoveTo(&parentID))
 		childID := child.ID()
 		useCase := application.NewMoveCategoryUseCase(newFakeCategories(parent, child))
@@ -134,10 +134,10 @@ func TestMoveCategoryUseCase(t *testing.T) {
 		assert.Nil(t, summary.ParentID)
 	})
 
-	t.Run("pai de si mesma", func(t *testing.T) {
+	t.Run("should refuse a category as its own parent without saving", func(t *testing.T) {
 		t.Parallel()
 
-		target := newCategory(t, ownerID, "Alimentação")
+		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		raw := categoryID.UUID()
 		categories := newFakeCategories(target)
@@ -152,16 +152,15 @@ func TestMoveCategoryUseCase(t *testing.T) {
 	})
 }
 
-// TestCategoryRuleUseCases cobre o ciclo de vida da regra pelo root.
-func TestCategoryRuleUseCases(t *testing.T) {
+func TestCategoryRules(t *testing.T) {
 	t.Parallel()
 
 	ownerID := uuid.New()
 
-	t.Run("adiciona, recusa duplicata e remove", func(t *testing.T) {
+	t.Run("should add a rule, refuse a duplicate and remove it through the aggregate root", func(t *testing.T) {
 		t.Parallel()
 
-		target := newCategory(t, ownerID, "Alimentação")
+		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
 		add := application.NewAddCategoryRuleUseCase(categories)
@@ -188,13 +187,13 @@ func TestCategoryRuleUseCases(t *testing.T) {
 		_, err = remove.Execute(context.Background(), application.RemoveCategoryRuleInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), RuleID: uuid.MustParse(ruleID),
 		})
-		require.ErrorIs(t, err, category.ErrRuleNotFound, "remover duas vezes não é idempotente por decisão do aggregate")
+		require.ErrorIs(t, err, category.ErrRuleNotFound, "removing twice is not idempotent, by decision of the aggregate")
 	})
 
-	t.Run("keyword em branco", func(t *testing.T) {
+	t.Run("should refuse a blank keyword without saving", func(t *testing.T) {
 		t.Parallel()
 
-		target := newCategory(t, ownerID, "Alimentação")
+		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
 		useCase := application.NewAddCategoryRuleUseCase(categories)
@@ -207,10 +206,10 @@ func TestCategoryRuleUseCases(t *testing.T) {
 		assert.Empty(t, categories.saved)
 	})
 
-	t.Run("categoria de outro usuário", func(t *testing.T) {
+	t.Run("should refuse with ErrForbidden a category of another user", func(t *testing.T) {
 		t.Parallel()
 
-		target := newCategory(t, uuid.New(), "Alheia")
+		target := newCategory(t, uuid.New(), "Someone Else's")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
 		useCase := application.NewAddCategoryRuleUseCase(categories)
@@ -223,7 +222,7 @@ func TestCategoryRuleUseCases(t *testing.T) {
 		assert.Empty(t, categories.saved)
 	})
 
-	t.Run("categoria inexistente", func(t *testing.T) {
+	t.Run("should refuse a missing category", func(t *testing.T) {
 		t.Parallel()
 
 		categories := newFakeCategories()

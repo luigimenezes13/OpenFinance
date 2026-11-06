@@ -10,12 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHealthz cobre os DOIS caminhos. O de falha é o que importa: um
-// /healthz que devolve 200 com o banco fora mantém no ar um processo que não
-// atende ninguém — e era intestável enquanto a rota recebia *sql.DB
-// concreto.
 func TestHealthz(t *testing.T) {
-	t.Run("banco acessível", func(t *testing.T) {
+	t.Run("should answer 200 healthy when the database is reachable", func(t *testing.T) {
 		server := newTestServer(t)
 
 		recorder := server.request(t, http.MethodGet, "/healthz", "", nil)
@@ -26,7 +22,7 @@ func TestHealthz(t *testing.T) {
 		assert.Equal(t, "reachable", body["database"])
 	})
 
-	t.Run("banco inacessível", func(t *testing.T) {
+	t.Run("should answer 503 unhealthy when the database is unreachable, since a 200 would keep alive a process that serves no one", func(t *testing.T) {
 		server := newTestServer(t, func(server *testServer) {
 			server.pinger = &fakePinger{err: errors.New("connection refused")}
 		})
@@ -37,24 +33,17 @@ func TestHealthz(t *testing.T) {
 		body := decode(t, recorder)
 		assert.Equal(t, "unhealthy", body["status"])
 	})
+
+	t.Run("should not require authentication, since the orchestrator sends no user header and a 401 would keep the pod from ever being ready", func(t *testing.T) {
+		server := newTestServer(t)
+
+		recorder := server.request(t, http.MethodGet, "/healthz", "", nil)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+	})
 }
 
-// TestHealthzNaoExigeAutenticacao: o orquestrador (k8s, compose) não manda
-// header de usuário. Se a rota tivesse entrado no grupo /v1, o health check
-// responderia 401 e o pod nunca ficaria pronto.
-func TestHealthzNaoExigeAutenticacao(t *testing.T) {
-	server := newTestServer(t)
-
-	recorder := server.request(t, http.MethodGet, "/healthz", "", nil)
-
-	assert.Equal(t, http.StatusOK, recorder.Code)
-}
-
-// TestTodasAsRotasV1ExigemAutenticacao é o teste de REGRESSÃO do
-// agrupamento: se alguém registrar uma rota nova fora do grupo autenticado,
-// a lista abaixo denuncia. É o furo de autorização mais fácil de cometer e
-// o mais silencioso.
-func TestTodasAsRotasV1ExigemAutenticacao(t *testing.T) {
+func TestEveryV1RouteRequiresAuthentication(t *testing.T) {
 	routes := []struct {
 		method string
 		path   string
@@ -77,13 +66,13 @@ func TestTodasAsRotasV1ExigemAutenticacao(t *testing.T) {
 	}
 
 	for _, route := range routes {
-		t.Run(route.method+" "+route.path, func(t *testing.T) {
+		t.Run("should answer 401 without identity on "+route.method+" "+route.path+", so a route registered outside the authenticated group is caught", func(t *testing.T) {
 			server := newTestServer(t)
 
 			recorder := server.request(t, route.method, route.path, "", map[string]any{})
 
 			assert.Equal(t, http.StatusUnauthorized, recorder.Code,
-				"rota sem middleware de identidade: %s %s", route.method, route.path)
+				"route without the identity middleware: %s %s", route.method, route.path)
 		})
 	}
 }

@@ -416,7 +416,7 @@ func mustCurrency(t *testing.T, code string) shared.Currency {
 
 func newManualAccount(t *testing.T, ownerID uuid.UUID) *account.Account {
 	t.Helper()
-	created, err := account.New(mustUserID(t, ownerID), "Conta Corrente", account.KindChecking, mustCurrency(t, "BRL"), account.NewManualSource())
+	created, err := account.New(mustUserID(t, ownerID), "Checking Account", account.KindChecking, mustCurrency(t, "BRL"), account.NewManualSource())
 	require.NoError(t, err)
 	return created
 }
@@ -425,7 +425,7 @@ func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string) *
 	t.Helper()
 	source, err := account.NewOpenFinanceSource(providerName, "provider-acc-1")
 	require.NoError(t, err)
-	created, err := account.New(mustUserID(t, ownerID), "Conta Conectada", account.KindChecking, mustCurrency(t, "BRL"), source)
+	created, err := account.New(mustUserID(t, ownerID), "Connected Account", account.KindChecking, mustCurrency(t, "BRL"), source)
 	require.NoError(t, err)
 	return created
 }
@@ -443,7 +443,7 @@ func newTransactionAt(t *testing.T, ownerID uuid.UUID, accountID account.Account
 
 func newCategoryFor(t *testing.T, ownerID uuid.UUID) *category.Category {
 	t.Helper()
-	created, err := category.New(mustUserID(t, ownerID), "Alimentação", nil)
+	created, err := category.New(mustUserID(t, ownerID), "Food", nil)
 	require.NoError(t, err)
 	return created
 }
