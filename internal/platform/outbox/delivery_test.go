@@ -1,9 +1,12 @@
 package outbox_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -108,6 +111,32 @@ func TestDeliveryWorker(t *testing.T) {
 		}
 		if !errors.Is(err, outbox.ErrUnknownSubscriber) {
 			t.Errorf("error = %v, want %v", err, outbox.ErrUnknownSubscriber)
+		}
+	})
+}
+
+func TestDomainEventLog(t *testing.T) {
+	t.Run("should log the delivered envelope under a stable subscriber name", func(t *testing.T) {
+		var output bytes.Buffer
+		subscriber := outbox.NewDomainEventLog(slog.New(slog.NewJSONHandler(&output, nil)))
+
+		err := subscriber.Handle(context.Background(), events.Envelope{
+			ID:         uuid.MustParse("0193a3b0-0000-7000-8000-0000000000aa"),
+			Name:       "probe.happened",
+			Version:    3,
+			OccurredAt: probeOccurredAt,
+		})
+
+		if err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		if subscriber.SubscriberName() != "log.domain_event" {
+			t.Errorf("subscriber name = %q", subscriber.SubscriberName())
+		}
+		for _, want := range []string{`"event":"probe.happened"`, `"event_id":"0193a3b0-0000-7000-8000-0000000000aa"`, `"version":3`} {
+			if !strings.Contains(output.String(), want) {
+				t.Errorf("log %s misses %s", output.String(), want)
+			}
 		}
 	})
 }

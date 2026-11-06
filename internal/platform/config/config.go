@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,11 +34,16 @@ type Config struct {
 
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
+
+	OutboxMaxWorkers int
+	OutboxJobTimeout time.Duration
 }
 
 const (
-	defaultHTTPAddr        = ":8080"
-	defaultShutdownTimeout = 10 * time.Second
+	defaultHTTPAddr         = ":8080"
+	defaultShutdownTimeout  = 10 * time.Second
+	defaultOutboxMaxWorkers = 10
+	defaultOutboxJobTimeout = 30 * time.Second
 )
 
 // Load lê e valida o ambiente.
@@ -52,12 +58,23 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: GOOGLE_CLIENT_ID é obrigatória")
 	}
 
+	outboxMaxWorkers, err := positiveIntOr("OUTBOX_MAX_WORKERS", defaultOutboxMaxWorkers)
+	if err != nil {
+		return Config{}, err
+	}
+	outboxJobTimeout, err := positiveDurationOr("OUTBOX_JOB_TIMEOUT", defaultOutboxJobTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		DatabaseURL:        databaseURL,
 		GoogleClientID:     googleClientID,
 		CORSAllowedOrigins: splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),
 		HTTPAddr:           valueOr(os.Getenv("HTTP_ADDR"), defaultHTTPAddr),
 		ShutdownTimeout:    defaultShutdownTimeout,
+		OutboxMaxWorkers:   outboxMaxWorkers,
+		OutboxJobTimeout:   outboxJobTimeout,
 	}, nil
 }
 
@@ -85,4 +102,28 @@ func valueOr(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func positiveIntOr(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("config: %s must be a positive integer, got %q", name, raw)
+	}
+	return value, nil
+}
+
+func positiveDurationOr(name string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("config: %s must be a positive duration like 30s, got %q", name, raw)
+	}
+	return value, nil
 }

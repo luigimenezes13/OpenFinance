@@ -11,6 +11,7 @@ require (
 	github.com/riverqueue/river/riverdriver/riverdatabasesql v0.51.0
 	github.com/riverqueue/river/rivertype v0.51.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/sync v0.24.0
 	google.golang.org/api v0.294.0
 )
 
@@ -81,7 +82,6 @@ require (
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect

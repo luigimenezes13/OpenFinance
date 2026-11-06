@@ -20,8 +20,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/ginhandler"
@@ -87,10 +89,11 @@ func run(logger *slog.Logger) error {
 
 	// --- Adapters concretos (a única parte do sistema que sabe o "quem") ---
 	unitOfWork := db.NewUnitOfWork(database)
-	writer, err := newAggregateWriter(database, unitOfWork)
+	outboxRuntime, err := newOutbox(database, unitOfWork, configuration, logger)
 	if err != nil {
 		return err
 	}
+	writer := outboxRuntime.writer
 
 	accounts := entrepo.NewAccountRepository(entClient, writer)
 	transactions := entrepo.NewTransactionRepository(entClient, writer)
@@ -163,38 +166,42 @@ func run(logger *slog.Logger) error {
 		identityginhandler.NewProfileHandler(viewProfile, logger),
 	)
 
-	return serve(ctx, logger, configuration, router)
+	return serve(ctx, logger, configuration, router, outboxRuntime)
 }
 
-// serve sobe o servidor e espera pelo sinal de parada.
-func serve(ctx context.Context, logger *slog.Logger, configuration config.Config, router http.Handler) error {
+// serve runs the HTTP server and the outbox worker side by side until the
+// signal arrives or either of them fails, then stops both.
+func serve(ctx context.Context, logger *slog.Logger, configuration config.Config, router http.Handler, outboxRuntime outboxRuntime) error {
 	server := &http.Server{Addr: configuration.HTTPAddr, Handler: router}
+	group, groupCtx := errgroup.WithContext(ctx)
 
-	// O servidor roda em goroutine própria porque ListenAndServe bloqueia
-	// até o servidor morrer — e precisamos da main livre pra esperar o
-	// sinal de shutdown.
-	serverFailed := make(chan error, 1)
-	go func() {
+	group.Go(func() error {
 		logger.Info("servidor ouvindo", slog.String("addr", configuration.HTTPAddr))
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverFailed <- err
-			return
+		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
-		serverFailed <- nil
-	}()
+		return nil
+	})
+	group.Go(func() error {
+		return outboxRuntime.start(groupCtx)
+	})
+	group.Go(func() error {
+		<-groupCtx.Done()
+		logger.Info("encerrando")
+		return shutdown(server, outboxRuntime, configuration.ShutdownTimeout)
+	})
 
-	select {
-	case err := <-serverFailed:
-		return err
-	case <-ctx.Done():
-		logger.Info("sinal recebido, encerrando")
-	}
+	return group.Wait()
+}
 
-	// Context NOVO pro shutdown: o antigo já está cancelado (foi o sinal
-	// que o cancelou), e usá-lo abortaria as requests em voo na hora — o
-	// oposto de shutdown gracioso.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), configuration.ShutdownTimeout)
+// shutdown uses a fresh context because the signal already cancelled the
+// original one, and reusing it would abort in-flight requests instead of
+// draining them. The server drains first so no request records an event after
+// the worker is gone.
+func shutdown(server *http.Server, outboxRuntime outboxRuntime, grace time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 
-	return server.Shutdown(shutdownCtx)
+	serverErr := server.Shutdown(shutdownCtx)
+	return errors.Join(serverErr, outboxRuntime.stop(shutdownCtx, grace))
 }
