@@ -9,45 +9,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCreateCategory cobre a categoria raiz: parent_id sai null, não
-// omitido — o cliente precisa distinguir "é raiz" de "a API parou de
-// mandar o campo".
 func TestCreateCategory(t *testing.T) {
-	server := newTestServer(t)
-	ownerID := uuid.New()
+	t.Run("should answer 201 for a root category with parent_id as null, not omitted, so the client can tell a root from a missing field", func(t *testing.T) {
+		server := newTestServer(t)
+		ownerID := uuid.New()
 
-	recorder := server.request(t, http.MethodPost, "/v1/categories", ownerID.String(), map[string]any{
-		"name": "  Alimentação  ",
+		recorder := server.request(t, http.MethodPost, "/v1/categories", ownerID.String(), map[string]any{
+			"name": "  Food  ",
+		})
+
+		require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+		body := decode(t, recorder)
+		assert.Equal(t, "Food", body["name"])
+		assert.Equal(t, ownerID.String(), body["user_id"])
+		assert.Contains(t, body, "parent_id")
+		assert.Nil(t, body["parent_id"])
+		assert.Len(t, server.categories.stored, 1)
 	})
 
-	require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
-	body := decode(t, recorder)
-	assert.Equal(t, "Alimentação", body["name"])
-	assert.Equal(t, ownerID.String(), body["user_id"])
-	assert.Contains(t, body, "parent_id")
-	assert.Nil(t, body["parent_id"])
-	assert.Len(t, server.categories.stored, 1)
-}
+	t.Run("should answer 201 for a subcategory with the optional parent_id", func(t *testing.T) {
+		server := newTestServer(t)
+		ownerID := uuid.New()
+		parentID := uuid.New()
 
-// TestCreateSubcategoria cobre o pai opcional.
-func TestCreateSubcategoria(t *testing.T) {
-	server := newTestServer(t)
-	ownerID := uuid.New()
-	parentID := uuid.New()
+		recorder := server.request(t, http.MethodPost, "/v1/categories", ownerID.String(), map[string]any{
+			"name": "Restaurants", "parent_id": parentID.String(),
+		})
 
-	recorder := server.request(t, http.MethodPost, "/v1/categories", ownerID.String(), map[string]any{
-		"name": "Restaurantes", "parent_id": parentID.String(),
+		require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+		body := decode(t, recorder)
+		assert.Equal(t, parentID.String(), body["parent_id"])
 	})
-
-	require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
-	body := decode(t, recorder)
-	assert.Equal(t, parentID.String(), body["parent_id"])
 }
 
-// TestCreateCategoryRecusa cobre a fronteira 400/422 no parent_id: string
-// que não é uuid é SINTAXE (400); uuid nil é uuid válido que o domínio
-// recusa (422).
-func TestCreateCategoryRecusa(t *testing.T) {
+func TestCreateCategoryRefusal(t *testing.T) {
 	cases := []struct {
 		name       string
 		body       any
@@ -55,26 +50,26 @@ func TestCreateCategoryRecusa(t *testing.T) {
 		wantCode   string
 	}{
 		{
-			name:       "nome ausente",
+			name:       "should answer 400 when the name is missing",
 			body:       map[string]any{},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "bad_request",
 		},
 		{
-			name:       "nome só com espaços",
+			name:       "should answer 422 for a blank name",
 			body:       map[string]any{"name": "   "},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   "invalid_category_name",
 		},
 		{
-			name:       "parent_id não é uuid",
-			body:       map[string]any{"name": "Restaurantes", "parent_id": "abc"},
+			name:       "should answer 400 when parent_id is not a uuid, since that is syntax",
+			body:       map[string]any{"name": "Restaurants", "parent_id": "abc"},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "bad_request",
 		},
 		{
-			name:       "parent_id nil",
-			body:       map[string]any{"name": "Restaurantes", "parent_id": uuid.Nil.String()},
+			name:       "should answer 422 for a nil parent_id, since it is a valid uuid the domain refuses",
+			body:       map[string]any{"name": "Restaurants", "parent_id": uuid.Nil.String()},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   "invalid_category_id",
 		},

@@ -355,7 +355,7 @@ func newManualAccount(t *testing.T, ownerID uuid.UUID, currencyCode string) *acc
 	kind, err := account.NewKind("checking")
 	require.NoError(t, err)
 
-	manual, err := account.New(mustUserID(t, ownerID), "Conta Corrente", kind, mustCurrency(t, currencyCode), account.NewManualSource())
+	manual, err := account.New(mustUserID(t, ownerID), "Checking Account", kind, mustCurrency(t, currencyCode), account.NewManualSource())
 	require.NoError(t, err)
 	return manual
 }
@@ -368,7 +368,7 @@ func newConnectedAccount(t *testing.T, ownerID uuid.UUID, providerName string, p
 	source, err := account.NewOpenFinanceSource(providerName, providerAccountID)
 	require.NoError(t, err)
 
-	connected, err := account.New(mustUserID(t, ownerID), "Conta Conectada", kind, mustCurrency(t, currencyCode), source)
+	connected, err := account.New(mustUserID(t, ownerID), "Connected Account", kind, mustCurrency(t, currencyCode), source)
 	require.NoError(t, err)
 	return connected
 }

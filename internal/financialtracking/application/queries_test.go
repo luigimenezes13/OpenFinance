@@ -17,36 +17,35 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
-// TestListAccounts cobre a projeção e o ISOLAMENTO por usuário — que é o
-// requisito de segurança das listagens: sem filtro por dono, o extrato de um
-// usuário apareceria para outro.
 func TestListAccounts(t *testing.T) {
 	t.Parallel()
 
-	ownerID := uuid.New()
-	otherID := uuid.New()
+	t.Run("should list only the user's accounts sorted by name, since without the owner filter one user's statement would leak to another", func(t *testing.T) {
+		t.Parallel()
 
-	manual := newManualAccount(t, ownerID, "BRL")
-	connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-1", "BRL")
-	fromOther := newManualAccount(t, otherID, "BRL")
+		ownerID := uuid.New()
+		otherID := uuid.New()
 
-	accounts := newFakeAccounts(manual, connected, fromOther)
-	useCase := application.NewListAccountsUseCase(accounts)
+		manual := newManualAccount(t, ownerID, "BRL")
+		connected := newConnectedAccount(t, ownerID, "pluggy", "pluggy-acc-1", "BRL")
+		fromOther := newManualAccount(t, otherID, "BRL")
 
-	output, err := useCase.Execute(context.Background(), application.ListAccountsInput{UserID: ownerID})
+		accounts := newFakeAccounts(manual, connected, fromOther)
+		useCase := application.NewListAccountsUseCase(accounts)
 
-	require.NoError(t, err)
-	require.Len(t, output.Accounts, 2, "a conta do outro usuário não aparece")
+		output, err := useCase.Execute(context.Background(), application.ListAccountsInput{UserID: ownerID})
 
-	// Ordenado por nome: "Conta Conectada" antes de "Conta Corrente".
-	assert.Equal(t, "Conta Conectada", output.Accounts[0].Name)
-	assert.Equal(t, "pluggy", output.Accounts[0].Provider, "conta conectada informa o provedor")
-	assert.Equal(t, "Conta Corrente", output.Accounts[1].Name)
-	assert.Empty(t, output.Accounts[1].Provider, "conta manual não tem provedor")
-	assert.False(t, output.Accounts[0].BalanceAsOf.IsZero(), "saldo sem data mente")
+		require.NoError(t, err)
+		require.Len(t, output.Accounts, 2, "the other user's account is not listed")
+
+		assert.Equal(t, "Checking Account", output.Accounts[0].Name)
+		assert.Empty(t, output.Accounts[0].Provider, "a manual account has no provider")
+		assert.Equal(t, "Connected Account", output.Accounts[1].Name)
+		assert.Equal(t, "pluggy", output.Accounts[1].Provider, "a connected account reports its provider")
+		assert.False(t, output.Accounts[1].BalanceAsOf.IsZero(), "a balance without a date lies")
+	})
 }
 
-// TestViewAccount cobre detalhe e as duas recusas do id vindo do cliente.
 func TestViewAccount(t *testing.T) {
 	t.Parallel()
 
@@ -55,7 +54,7 @@ func TestViewAccount(t *testing.T) {
 	accountID := target.ID()
 	useCase := application.NewViewAccountUseCase(newFakeAccounts(target))
 
-	t.Run("caminho feliz", func(t *testing.T) {
+	t.Run("should return the account summary", func(t *testing.T) {
 		t.Parallel()
 
 		summary, err := useCase.Execute(context.Background(), application.ViewAccountInput{
@@ -64,10 +63,10 @@ func TestViewAccount(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, accountID.String(), summary.ID)
-		assert.Equal(t, "Conta Corrente", summary.Name)
+		assert.Equal(t, "Checking Account", summary.Name)
 	})
 
-	t.Run("conta de outro usuário", func(t *testing.T) {
+	t.Run("should refuse with ErrForbidden an account of another user", func(t *testing.T) {
 		t.Parallel()
 
 		_, err := useCase.Execute(context.Background(), application.ViewAccountInput{
@@ -77,7 +76,7 @@ func TestViewAccount(t *testing.T) {
 		require.ErrorIs(t, err, shared.ErrForbidden)
 	})
 
-	t.Run("conta inexistente", func(t *testing.T) {
+	t.Run("should refuse a missing account", func(t *testing.T) {
 		t.Parallel()
 
 		_, err := useCase.Execute(context.Background(), application.ViewAccountInput{
@@ -88,39 +87,41 @@ func TestViewAccount(t *testing.T) {
 	})
 }
 
-// TestListCategories cobre a projeção com regras dentro.
 func TestListCategories(t *testing.T) {
 	t.Parallel()
 
-	ownerID := uuid.New()
-	food := newCategory(t, ownerID, "Alimentação")
-	rule, err := category.NewCategoryRule("ifood")
-	require.NoError(t, err)
-	require.NoError(t, food.AddRule(rule))
+	t.Run("should list only the user's categories with their rules, since rules live inside the aggregate", func(t *testing.T) {
+		t.Parallel()
 
-	parentID := food.ID()
-	restaurants, err := category.New(mustUserID(t, ownerID), "Restaurantes", &parentID)
-	require.NoError(t, err)
+		ownerID := uuid.New()
+		food := newCategory(t, ownerID, "Food")
+		rule, err := category.NewCategoryRule("ifood")
+		require.NoError(t, err)
+		require.NoError(t, food.AddRule(rule))
 
-	fromOther := newCategory(t, uuid.New(), "Alheia")
+		parentID := food.ID()
+		restaurants, err := category.New(mustUserID(t, ownerID), "Restaurants", &parentID)
+		require.NoError(t, err)
 
-	useCase := application.NewListCategoriesUseCase(newFakeCategories(food, restaurants, fromOther))
+		fromOther := newCategory(t, uuid.New(), "Someone Else's")
 
-	output, err := useCase.Execute(context.Background(), application.ListCategoriesInput{UserID: ownerID})
+		useCase := application.NewListCategoriesUseCase(newFakeCategories(food, restaurants, fromOther))
 
-	require.NoError(t, err)
-	require.Len(t, output.Categories, 2)
+		output, err := useCase.Execute(context.Background(), application.ListCategoriesInput{UserID: ownerID})
 
-	assert.Equal(t, "Alimentação", output.Categories[0].Name)
-	assert.Nil(t, output.Categories[0].ParentID)
-	require.Len(t, output.Categories[0].Rules, 1, "as regras vêm junto: estão dentro do aggregate")
-	assert.Equal(t, "ifood", output.Categories[0].Rules[0].Keyword)
+		require.NoError(t, err)
+		require.Len(t, output.Categories, 2)
 
-	require.NotNil(t, output.Categories[1].ParentID)
-	assert.Equal(t, parentID.String(), *output.Categories[1].ParentID)
+		assert.Equal(t, "Food", output.Categories[0].Name)
+		assert.Nil(t, output.Categories[0].ParentID)
+		require.Len(t, output.Categories[0].Rules, 1, "the rules come along: they live inside the aggregate")
+		assert.Equal(t, "ifood", output.Categories[0].Rules[0].Keyword)
+
+		require.NotNil(t, output.Categories[1].ParentID)
+		assert.Equal(t, parentID.String(), *output.Categories[1].ParentID)
+	})
 }
 
-// TestListTransactions cobre projeção, ordem e paginação.
 func TestListTransactions(t *testing.T) {
 	t.Parallel()
 
@@ -136,19 +137,19 @@ func TestListTransactions(t *testing.T) {
 	transactions := newFakeTransactions(older, middle, newest, fromOther)
 	useCase := application.NewListTransactionsUseCase(transactions)
 
-	t.Run("ordem e isolamento", func(t *testing.T) {
+	t.Run("should list only the user's transactions newest first with the default limit", func(t *testing.T) {
 		t.Parallel()
 
 		output, err := useCase.Execute(context.Background(), application.ListTransactionsInput{UserID: ownerID})
 
 		require.NoError(t, err)
-		require.Len(t, output.Transactions, 3, "transação de outro usuário não aparece")
-		assert.Equal(t, int64(-300), output.Transactions[0].Amount, "extrato começa pela mais recente")
+		require.Len(t, output.Transactions, 3, "a transaction of another user is not listed")
+		assert.Equal(t, int64(-300), output.Transactions[0].Amount, "the statement starts with the newest")
 		assert.Equal(t, int64(-100), output.Transactions[2].Amount)
-		assert.Equal(t, kernel.DefaultLimit, output.Limit, "o default é devolvido pra o cliente montar a próxima página")
+		assert.Equal(t, kernel.DefaultLimit, output.Limit, "the default is returned so the client can build the next page")
 	})
 
-	t.Run("paginação", func(t *testing.T) {
+	t.Run("should paginate with limit and offset", func(t *testing.T) {
 		t.Parallel()
 
 		first, err := useCase.Execute(context.Background(), application.ListTransactionsInput{
@@ -165,7 +166,7 @@ func TestListTransactions(t *testing.T) {
 		assert.NotEqual(t, first.Transactions[0].ID, second.Transactions[0].ID)
 	})
 
-	t.Run("filtro por período", func(t *testing.T) {
+	t.Run("should filter by period", func(t *testing.T) {
 		t.Parallel()
 
 		output, err := useCase.Execute(context.Background(), application.ListTransactionsInput{
@@ -175,10 +176,10 @@ func TestListTransactions(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		assert.Len(t, output.Transactions, 2, "a de 72h atrás fica fora")
+		assert.Len(t, output.Transactions, 2, "the one from 72h ago stays out")
 	})
 
-	t.Run("filtro por conta", func(t *testing.T) {
+	t.Run("should filter by account", func(t *testing.T) {
 		t.Parallel()
 
 		otherAccountID := account.NewAccountID()
@@ -192,9 +193,7 @@ func TestListTransactions(t *testing.T) {
 	})
 }
 
-// TestListTransactionsRecusa: filtro inválido morre na construção do
-// critério, antes de virar consulta.
-func TestListTransactionsRecusa(t *testing.T) {
+func TestListTransactionsRefusal(t *testing.T) {
 	t.Parallel()
 
 	ownerID := uuid.New()
@@ -206,32 +205,32 @@ func TestListTransactionsRecusa(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "usuário nil",
+			name:    "should refuse a nil user",
 			input:   application.ListTransactionsInput{UserID: uuid.Nil},
 			wantErr: shared.ErrInvalidUserID,
 		},
 		{
-			name:    "limite acima do teto",
+			name:    "should refuse a limit above the ceiling",
 			input:   application.ListTransactionsInput{UserID: ownerID, Limit: kernel.MaxLimit + 1},
 			wantErr: kernel.ErrInvalidPage,
 		},
 		{
-			name:    "offset negativo",
+			name:    "should refuse a negative offset",
 			input:   application.ListTransactionsInput{UserID: ownerID, Offset: -1},
 			wantErr: kernel.ErrInvalidPage,
 		},
 		{
-			name:    "conta nil no filtro",
+			name:    "should refuse a nil account in the filter",
 			input:   application.ListTransactionsInput{UserID: ownerID, AccountID: &nilUUID},
 			wantErr: account.ErrInvalidID,
 		},
 		{
-			name:    "categoria nil no filtro",
+			name:    "should refuse a nil category in the filter",
 			input:   application.ListTransactionsInput{UserID: ownerID, CategoryID: &nilUUID},
 			wantErr: category.ErrInvalidID,
 		},
 		{
-			name: "período invertido",
+			name: "should refuse an inverted period before it becomes a query",
 			input: application.ListTransactionsInput{
 				UserID: ownerID,
 				From:   time.Now(),
@@ -254,7 +253,6 @@ func TestListTransactionsRecusa(t *testing.T) {
 	}
 }
 
-// TestViewTransaction cobre o detalhe, incluindo o bloco de categoria.
 func TestViewTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -268,7 +266,7 @@ func TestViewTransaction(t *testing.T) {
 
 	useCase := application.NewViewTransactionUseCase(newFakeTransactions(target))
 
-	t.Run("caminho feliz com categoria", func(t *testing.T) {
+	t.Run("should return the transaction summary with its category assignment", func(t *testing.T) {
 		t.Parallel()
 
 		summary, err := useCase.Execute(context.Background(), application.ViewTransactionInput{
@@ -282,10 +280,10 @@ func TestViewTransaction(t *testing.T) {
 		require.NotNil(t, summary.AssignedBy)
 		assert.Equal(t, "user", *summary.AssignedBy)
 		require.NotNil(t, summary.AssignedAt)
-		assert.Empty(t, summary.Provider, "lançamento manual não tem provedor")
+		assert.Empty(t, summary.Provider, "a manual transaction has no provider")
 	})
 
-	t.Run("transação de outro usuário", func(t *testing.T) {
+	t.Run("should refuse with ErrForbidden a transaction of another user", func(t *testing.T) {
 		t.Parallel()
 
 		_, err := useCase.Execute(context.Background(), application.ViewTransactionInput{
