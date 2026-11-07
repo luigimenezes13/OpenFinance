@@ -9,6 +9,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // RecordTransactionInput é a entrada do lançamento MANUAL. Amount em
@@ -50,13 +51,13 @@ type RecordTransactionOutput struct {
 // provider emite Imported. Injetar um dispatcher aqui seria dependência
 // morta (o spec previa um; a decisão de não injetar é de 2026-08-25).
 type RecordTransactionUseCase struct {
-	transactions transaction.Repository
-	accounts     account.Repository
+	transactions      transaction.Repository
+	accounts          account.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewRecordTransactionUseCase injeta as dependências por construtor.
-func NewRecordTransactionUseCase(transactions transaction.Repository, accounts account.Repository) *RecordTransactionUseCase {
-	return &RecordTransactionUseCase{transactions: transactions, accounts: accounts}
+func NewRecordTransactionUseCase(transactions transaction.Repository, accounts account.Repository, transactionRunner *kernel.TransactionRunner) *RecordTransactionUseCase {
+	return &RecordTransactionUseCase{transactions: transactions, accounts: accounts, transactionRunner: transactionRunner}
 }
 
 // Execute orquestra o lançamento: resolve identidades, carrega a conta pra
@@ -106,7 +107,7 @@ func (u *RecordTransactionUseCase) Execute(ctx context.Context, input RecordTran
 		return RecordTransactionOutput{}, err
 	}
 
-	if err := u.transactions.Save(ctx, recorded); err != nil {
+	if err := u.save(ctx, recorded); err != nil {
 		return RecordTransactionOutput{}, err
 	}
 
@@ -139,4 +140,11 @@ func toRecordTransactionOutput(recorded *transaction.Transaction, currency share
 		OccurredAt:  recorded.OccurredAt(),
 		Description: recorded.Description(),
 	}
+}
+
+func (u *RecordTransactionUseCase) save(ctx context.Context, recorded *transaction.Transaction) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(recorded)
+		return u.transactions.Save(ctx, recorded)
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // MoveCategoryInput é a entrada da re-parentagem. ParentID nil = a categoria
@@ -23,12 +24,12 @@ type MoveCategoryInput struct {
 // árvore"), e juntá-las esconderia qual delas aconteceu no log e no futuro
 // evento.
 type MoveCategoryUseCase struct {
-	categories category.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewMoveCategoryUseCase injeta as dependências por construtor.
-func NewMoveCategoryUseCase(categories category.Repository) *MoveCategoryUseCase {
-	return &MoveCategoryUseCase{categories: categories}
+func NewMoveCategoryUseCase(categories category.Repository, transactionRunner *kernel.TransactionRunner) *MoveCategoryUseCase {
+	return &MoveCategoryUseCase{categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute carrega a categoria, checa o dono e delega o movimento.
@@ -57,9 +58,15 @@ func (u *MoveCategoryUseCase) Execute(ctx context.Context, input MoveCategoryInp
 		return CategorySummary{}, err
 	}
 
-	if err := u.categories.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return CategorySummary{}, err
 	}
 
 	return toCategorySummary(target), nil
+}
+
+func (u *MoveCategoryUseCase) save(ctx context.Context, target *category.Category) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, _ kernel.TransactionContext) error {
+		return u.categories.Save(ctx, target)
+	})
 }

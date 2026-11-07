@@ -16,7 +16,10 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
-var errSubscriberFailed = errors.New("subscriber failed")
+var (
+	errSubscriberFailed = errors.New("subscriber failed")
+	errPersistFailed    = errors.New("persist failed")
+)
 
 type spySubscriber struct {
 	name      string

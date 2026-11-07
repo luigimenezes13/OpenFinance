@@ -21,6 +21,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/openfinance"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
@@ -28,26 +29,7 @@ import (
 // translate nor wrap it: a boundary error goes up as it came.
 var errInfra = errors.New("fake: infrastructure failure")
 
-// recordedEvents mirrors what the real repositories do inside Save: the
-// aggregate's pending events go to the outbox and are cleared afterwards.
-type recordedEvents struct {
-	savedEvents []events.Event
-}
-
-func (r *recordedEvents) record(pending []events.Event) {
-	r.savedEvents = append(r.savedEvents, pending...)
-}
-
-func (r *recordedEvents) savedEventNames() []string {
-	names := make([]string, 0, len(r.savedEvents))
-	for _, saved := range r.savedEvents {
-		names = append(names, saved.EventName())
-	}
-	return names
-}
-
 type fakeAccounts struct {
-	recordedEvents
 	stored  map[string]*account.Account
 	saved   []*account.Account
 	saveErr error
@@ -68,8 +50,6 @@ func (f *fakeAccounts) Save(_ context.Context, target *account.Account) error {
 	}
 	f.stored[target.ID().String()] = target
 	f.saved = append(f.saved, target)
-	f.record(target.Events())
-	target.ClearEvents()
 	return nil
 }
 
@@ -105,7 +85,6 @@ func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*a
 }
 
 type fakeTransactions struct {
-	recordedEvents
 	stored  map[string]*transaction.Transaction
 	saved   []*transaction.Transaction
 	saveErr error
@@ -126,8 +105,6 @@ func (f *fakeTransactions) Save(_ context.Context, target *transaction.Transacti
 	}
 	f.stored[target.ID().String()] = target
 	f.saved = append(f.saved, target)
-	f.record(target.Events())
-	target.ClearEvents()
 	return nil
 }
 
@@ -281,6 +258,38 @@ func (f *fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context)
 		return f.err
 	}
 	return work(ctx)
+}
+
+// fakeOutbox captures the events the transaction runner records. When
+// recordErr is set it records nothing and fails, like an outbox insert that
+// breaks inside the unit of work.
+type fakeOutbox struct {
+	recorded  []events.Event
+	recordErr error
+}
+
+func (f *fakeOutbox) Record(_ context.Context, recorded ...events.Event) error {
+	if f.recordErr != nil {
+		return f.recordErr
+	}
+	f.recorded = append(f.recorded, recorded...)
+	return nil
+}
+
+func (f *fakeOutbox) recordedEventNames() []string {
+	names := make([]string, 0, len(f.recorded))
+	for _, recorded := range f.recorded {
+		names = append(names, recorded.EventName())
+	}
+	return names
+}
+
+func newTransactionRunner(unitOfWork *fakeUnitOfWork, outbox *fakeOutbox) *kernel.TransactionRunner {
+	return kernel.NewTransactionRunner(unitOfWork, outbox)
+}
+
+func newPassThroughRunner() *kernel.TransactionRunner {
+	return newTransactionRunner(&fakeUnitOfWork{}, &fakeOutbox{})
 }
 
 // fakeProvider records the arguments it was called with: that is how a test

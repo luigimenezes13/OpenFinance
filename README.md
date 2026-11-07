@@ -44,7 +44,7 @@ adapter/  ────→  application/  ────→  domain/
 
 Decisões que regem todo o código:
 
-- **Ports vivem no domain** (estilo Evans): repositories, a porta `OpenFinanceProvider` e, no kernel, o `UnitOfWork` e o `Subscriber` são interfaces declaradas dentro do domínio; `application/` contém apenas use cases.
+- **Ports vivem no domain** (estilo Evans): repositories, a porta `OpenFinanceProvider` e, no kernel, o `UnitOfWork`, o `Outbox` e o `Subscriber` são interfaces declaradas dentro do domínio; `application/` contém apenas use cases.
 - **Dinheiro é `int64` em centavos** encapsulado no VO `Money`. Float é proibido em domínio financeiro.
 - **Sem ORM**: persistência com `pgx` e SQL escrito à mão.
 - **Aggregates encapsulados**: campos não-exportados, mutação só por métodos do root, eventos de domínio emitidos apenas pelo aggregate root.
@@ -126,7 +126,7 @@ Todas as rotas `/v1` exigem `Authorization: Bearer <google_id_token>`.
 - **Sem FK entre aggregates.** `accounts`, `transactions` e `categories` são fronteiras de consistência separadas. FK existe apenas *dentro* do aggregate (`category_rules` → `categories`, com CASCADE).
 - **Um schema/client/migration Ent por bounded context.** Assim é o compilador que garante a fronteira: o client do Identity não tem entity de `Account` para consultar.
 - **O `sub` do Google é referência externa, não identidade do sistema.** Cada BC tem seu próprio `UserID`; a tradução entre contextos é em uuid puro, na borda.
-- **Evento de domínio sai por outbox transacional.** O `Save` do repositório grava o aggregate e enfileira uma entrega por assinante na mesma transação; um worker do River, rodando junto da API, entrega depois com retry. Processo que morre entre o commit e a entrega não perde evento, e assinante que falha não derruba a requisição. A entrega é at-least-once: o assinante deduplica pelo `ID` do envelope. Desenho completo no [spec do outbox](docs/superpowers/specs/2026-11-04-outbox-design.md).
+- **Evento de domínio sai por outbox transacional.** Todo use case de escrita abre a transação com o `kernel.TransactionRunner` (o mesmo desenho do `TransactionRunner` do `mars-billing`): o repositório só persiste, e o runner grava no outbox, antes do commit, uma entrega por assinante para cada evento dos aggregates que o use case entregou; um worker do River, rodando junto da API, entrega depois com retry. Processo que morre entre o commit e a entrega não perde evento, e assinante que falha não derruba a requisição. A entrega é at-least-once: o assinante deduplica pelo `ID` do envelope. Desenho completo no [spec do outbox](docs/superpowers/specs/2026-11-04-outbox-design.md).
 - **Importação é tudo ou nada.** O provider é consultado antes de abrir a transação (rede dentro de transação seguraria lock); depois as transações importadas e o saldo são gravados numa unidade só.
 - **Erro de domínio é traduzido para HTTP em um lugar só**, por uma lista percorrida com `errors.Is`. 400 é "não entendi a requisição"; 422 é "entendi e o domínio recusou".
 

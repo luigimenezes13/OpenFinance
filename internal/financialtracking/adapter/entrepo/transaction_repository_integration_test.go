@@ -51,7 +51,7 @@ func TestTransactionRepositoryIntegration(t *testing.T) {
 
 	t.Run("should round-trip a manual transaction with the optional columns absent and stored as NULL", func(t *testing.T) {
 		truncateAll(t)
-		repository := newTransactionRepository(t)
+		repository := newTransactionRepository()
 		occurredAt := time.Now().Add(-3 * time.Hour)
 		original, err := transaction.NewManual(
 			mustUserID(t, uuid.New()),
@@ -89,9 +89,9 @@ func TestTransactionRepositoryIntegration(t *testing.T) {
 		assert.Nil(t, assignedAt)
 	})
 
-	t.Run("should round-trip an imported, categorized and reconciled transaction and queue its events", func(t *testing.T) {
+	t.Run("should round-trip an imported, categorized and reconciled transaction", func(t *testing.T) {
 		truncateAll(t)
-		repository := newTransactionRepository(t)
+		repository := newTransactionRepository()
 		reference, err := transaction.NewExternalRef("pluggy", "tx-abc-123")
 		require.NoError(t, err)
 		original, err := transaction.NewFromProvider(
@@ -130,18 +130,11 @@ func TestTransactionRepositoryIntegration(t *testing.T) {
 		originalSnapshot := original.Snapshot()
 		assert.WithinDuration(t, originalSnapshot.CategoryAssignedAt, assignment.AssignedAt(), time.Millisecond,
 			"the assignment instant comes from the database, not from time.Now() on read")
-
-		assert.Empty(t, original.Events(), "a successful save hands the pending events to the outbox")
-		assert.Equal(t, []string{
-			transaction.EventTypeCategorized,
-			transaction.EventTypeImported,
-			transaction.EventTypeReconciled,
-		}, queuedEventNames(t))
 	})
 
 	t.Run("should update the category assignment instead of duplicating the transaction", func(t *testing.T) {
 		truncateAll(t)
-		repository := newTransactionRepository(t)
+		repository := newTransactionRepository()
 		target, err := transaction.NewManual(
 			mustUserID(t, uuid.New()),
 			account.NewAccountID(),
@@ -173,7 +166,7 @@ func TestTransactionRepositoryIntegration(t *testing.T) {
 
 	t.Run("should translate a missing row into the aggregate not found sentinel", func(t *testing.T) {
 		truncateAll(t)
-		repository := newTransactionRepository(t)
+		repository := newTransactionRepository()
 		missingID, err := transaction.TransactionIDFromUUID(uuid.New())
 		require.NoError(t, err)
 

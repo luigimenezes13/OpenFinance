@@ -45,7 +45,7 @@ func TestAccountRepositoryListByUserIntegration(t *testing.T) {
 
 	t.Run("should list only the owner's accounts ordered by name so a statement never shows up for someone else", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		ownerID := uuid.New()
 		otherID := uuid.New()
 
@@ -102,7 +102,7 @@ func TestTransactionRepositoryListIntegration(t *testing.T) {
 	truncateAll(t)
 	ctx := context.Background()
 
-	repository := newTransactionRepository(t)
+	repository := newTransactionRepository()
 	ownerID := uuid.New()
 	accountID := account.NewAccountID()
 	otherAccountID := account.NewAccountID()

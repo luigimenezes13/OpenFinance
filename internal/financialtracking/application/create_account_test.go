@@ -20,7 +20,8 @@ func TestCreateAccount(t *testing.T) {
 		t.Parallel()
 
 		accounts := newFakeAccounts()
-		useCase := application.NewCreateAccountUseCase(accounts)
+		outbox := &fakeOutbox{}
+		useCase := application.NewCreateAccountUseCase(accounts, newTransactionRunner(&fakeUnitOfWork{}, outbox))
 		ownerID := uuid.New()
 
 		output, err := useCase.Execute(context.Background(), application.CreateAccountInput{
@@ -40,7 +41,7 @@ func TestCreateAccount(t *testing.T) {
 		require.Len(t, accounts.saved, 1, "the use case must persist the account")
 		saved := accounts.saved[0]
 		assert.Equal(t, output.ID, saved.ID().String())
-		assert.Empty(t, accounts.savedEvents, "creating an account saves no event")
+		assert.Empty(t, outbox.recorded, "creating an account records no event")
 	})
 
 	t.Run("should return the repository error as is, since translating it is the HTTP edge's job", func(t *testing.T) {
@@ -48,7 +49,7 @@ func TestCreateAccount(t *testing.T) {
 
 		accounts := newFakeAccounts()
 		accounts.saveErr = errInfra
-		useCase := application.NewCreateAccountUseCase(accounts)
+		useCase := application.NewCreateAccountUseCase(accounts, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.CreateAccountInput{
 			UserID:   uuid.New(),
@@ -101,7 +102,7 @@ func TestCreateAccountRefusal(t *testing.T) {
 			t.Parallel()
 
 			accounts := newFakeAccounts()
-			useCase := application.NewCreateAccountUseCase(accounts)
+			useCase := application.NewCreateAccountUseCase(accounts, newPassThroughRunner())
 
 			_, err := useCase.Execute(context.Background(), testCase.input)
 

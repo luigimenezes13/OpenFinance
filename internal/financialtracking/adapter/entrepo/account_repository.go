@@ -8,7 +8,6 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo/ent/account"
 	domainaccount "github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
-	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
 // AccountRepository implementa account.Repository.
@@ -19,21 +18,18 @@ import (
 // explícito, pra ninguém confundir entity de persistência com aggregate.
 type AccountRepository struct {
 	client *ent.Client
-	writer *outbox.AggregateWriter
 }
 
 // Checagem de contrato em tempo de compilação: se a porta mudar, o build
 // quebra aqui e não em runtime.
 var _ domainaccount.Repository = (*AccountRepository)(nil)
 
-func NewAccountRepository(client *ent.Client, writer *outbox.AggregateWriter) *AccountRepository {
-	return &AccountRepository{client: client, writer: writer}
+func NewAccountRepository(client *ent.Client) *AccountRepository {
+	return &AccountRepository{client: client}
 }
 
 func (r *AccountRepository) Save(ctx context.Context, target *domainaccount.Account) error {
-	return r.writer.Write(ctx, target, func(ctx context.Context) error {
-		return r.upsert(ctx, target.Snapshot())
-	})
+	return r.upsert(ctx, target.Snapshot())
 }
 
 // upsert decide entre insert e update pelo OnConflict, então o use case não

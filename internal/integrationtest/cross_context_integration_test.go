@@ -26,6 +26,7 @@ import (
 	identityentrepo "github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
 	identityeventmapper "github.com/luigimenezes13/financial-manager/internal/identity/adapter/eventmapper"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
@@ -39,11 +40,11 @@ const (
 var errSaveFailed = errors.New("save failed")
 
 type stack struct {
-	database     *sql.DB
-	unitOfWork   *db.SQLUnitOfWork
-	accounts     *entrepo.AccountRepository
-	transactions *entrepo.TransactionRepository
-	users        *identityentrepo.UserRepository
+	database          *sql.DB
+	transactionRunner *kernel.TransactionRunner
+	accounts          *entrepo.AccountRepository
+	transactions      *entrepo.TransactionRepository
+	users             *identityentrepo.UserRepository
 }
 
 type silentSubscriber struct{}
@@ -71,17 +72,16 @@ func newStack(t *testing.T) stack {
 		t.Fatalf("new river client: %v", err)
 	}
 
-	unitOfWork := db.NewUnitOfWork(database)
-	writer := outbox.NewAggregateWriter(unitOfWork, outbox.NewRecorder(mappers, subscriptions, queue))
+	transactionRunner := kernel.NewTransactionRunner(db.NewUnitOfWork(database), outbox.NewRecorder(mappers, subscriptions, queue))
 	financialTrackingClient := entrepo.NewClient(database)
 	identityClient := identityentrepo.NewClient(database)
 
 	return stack{
-		database:     database,
-		unitOfWork:   unitOfWork,
-		accounts:     entrepo.NewAccountRepository(financialTrackingClient, writer),
-		transactions: entrepo.NewTransactionRepository(financialTrackingClient, writer),
-		users:        identityentrepo.NewUserRepository(identityClient, writer),
+		database:          database,
+		transactionRunner: transactionRunner,
+		accounts:          entrepo.NewAccountRepository(financialTrackingClient),
+		transactions:      entrepo.NewTransactionRepository(financialTrackingClient),
+		users:             identityentrepo.NewUserRepository(identityClient),
 	}
 }
 
@@ -169,7 +169,11 @@ func (s stack) connectedAccount(t *testing.T) *account.Account {
 	if err != nil {
 		t.Fatalf("account: %v", err)
 	}
-	if err := s.accounts.Save(context.Background(), connected); err != nil {
+	err = s.transactionRunner.Begin(context.Background(), func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(connected)
+		return s.accounts.Save(ctx, connected)
+	})
+	if err != nil {
 		t.Fatalf("save account: %v", err)
 	}
 	return connected
@@ -221,7 +225,7 @@ func TestImportFromProviderIntegration(t *testing.T) {
 	t.Run("should save every imported transaction, the balance and their deliveries together", func(t *testing.T) {
 		stack := newStack(t)
 		connected := stack.connectedAccount(t)
-		useCase := application.NewImportFromProviderUseCase(stack.transactions, stack.accounts, mockprovider.New(), stack.unitOfWork)
+		useCase := application.NewImportFromProviderUseCase(stack.transactions, stack.accounts, mockprovider.New(), stack.transactionRunner)
 
 		output, err := useCase.Execute(context.Background(), importInput(connected))
 
@@ -248,7 +252,7 @@ func TestImportFromProviderIntegration(t *testing.T) {
 		stack := newStack(t)
 		connected := stack.connectedAccount(t)
 		transactions := &failingOnSave{Repository: stack.transactions, failOn: 3}
-		useCase := application.NewImportFromProviderUseCase(transactions, stack.accounts, mockprovider.New(), stack.unitOfWork)
+		useCase := application.NewImportFromProviderUseCase(transactions, stack.accounts, mockprovider.New(), stack.transactionRunner)
 
 		_, err := useCase.Execute(context.Background(), importInput(connected))
 
@@ -271,7 +275,7 @@ func TestImportFromProviderIntegration(t *testing.T) {
 	})
 }
 
-func TestCrossContextUnitOfWorkIntegration(t *testing.T) {
+func TestCrossContextTransactionIntegration(t *testing.T) {
 	t.Run("should commit writes from both bounded contexts in one transaction", func(t *testing.T) {
 		stack := newStack(t)
 		connected := stack.connectedAccount(t)
@@ -280,7 +284,9 @@ func TestCrossContextUnitOfWorkIntegration(t *testing.T) {
 			t.Fatalf("rename: %v", err)
 		}
 
-		err := stack.unitOfWork.Run(context.Background(), func(ctx context.Context) error {
+		err := stack.transactionRunner.Begin(context.Background(), func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+			transactionContext.RecordEventsOf(user)
+			transactionContext.RecordEventsOf(connected)
 			if err := stack.users.Save(ctx, user); err != nil {
 				return err
 			}
@@ -309,7 +315,8 @@ func TestCrossContextUnitOfWorkIntegration(t *testing.T) {
 			t.Fatalf("rename: %v", err)
 		}
 
-		err := stack.unitOfWork.Run(context.Background(), func(ctx context.Context) error {
+		err := stack.transactionRunner.Begin(context.Background(), func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+			transactionContext.RecordEventsOf(user)
 			if err := stack.users.Save(ctx, user); err != nil {
 				return err
 			}
@@ -330,6 +337,9 @@ func TestCrossContextUnitOfWorkIntegration(t *testing.T) {
 		}
 		if got := stack.count(t, "SELECT count(*) FROM river_job"); got != 0 {
 			t.Errorf("deliveries = %d, want 0", got)
+		}
+		if len(user.Events()) != 1 {
+			t.Errorf("pending events = %d, want the registered event kept after the rollback", len(user.Events()))
 		}
 	})
 }

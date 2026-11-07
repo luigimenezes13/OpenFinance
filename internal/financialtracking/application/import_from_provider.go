@@ -46,30 +46,30 @@ type ImportFromProviderOutput struct {
 
 // ImportFromProviderUseCase importa transações de uma conta conectada.
 // Quatro dependências: transações (grava), contas (lê e grava o saldo), a
-// porta Provider (lê o mundo externo) e o UnitOfWork, que torna a gravação
-// das N transações e do saldo uma coisa só.
+// porta Provider (lê o mundo externo) e o TransactionRunner, que torna a
+// gravação das N transações e do saldo, com os eventos, uma coisa só.
 //
 // Este é o use case que materializa a ACL: ele recebe ProviderTransaction
 // (DTO de fronteira) e produz aggregate Transaction. Nada de Pluggy entra
 // aqui — o adapter já traduziu.
 type ImportFromProviderUseCase struct {
-	transactions transaction.Repository
-	accounts     account.Repository
-	provider     openfinance.Provider
-	unitOfWork   kernel.UnitOfWork
+	transactions      transaction.Repository
+	accounts          account.Repository
+	provider          openfinance.Provider
+	transactionRunner *kernel.TransactionRunner
 }
 
 func NewImportFromProviderUseCase(
 	transactions transaction.Repository,
 	accounts account.Repository,
 	provider openfinance.Provider,
-	unitOfWork kernel.UnitOfWork,
+	transactionRunner *kernel.TransactionRunner,
 ) *ImportFromProviderUseCase {
 	return &ImportFromProviderUseCase{
-		transactions: transactions,
-		accounts:     accounts,
-		provider:     provider,
-		unitOfWork:   unitOfWork,
+		transactions:      transactions,
+		accounts:          accounts,
+		provider:          provider,
+		transactionRunner: transactionRunner,
 	}
 }
 
@@ -128,8 +128,8 @@ func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFro
 		return ImportFromProviderOutput{}, err
 	}
 
-	err = u.unitOfWork.Run(ctx, func(ctx context.Context) error {
-		return u.persist(ctx, imported, targetAccount, applied)
+	err = u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		return u.persist(ctx, transactionContext, imported, targetAccount, applied)
 	})
 	if err != nil {
 		return ImportFromProviderOutput{}, err
@@ -147,6 +147,7 @@ func (u *ImportFromProviderUseCase) Execute(ctx context.Context, input ImportFro
 
 func (u *ImportFromProviderUseCase) persist(
 	ctx context.Context,
+	transactionContext kernel.TransactionContext,
 	imported []*transaction.Transaction,
 	targetAccount *account.Account,
 	balanceApplied bool,
@@ -155,10 +156,12 @@ func (u *ImportFromProviderUseCase) persist(
 		if err := u.transactions.Save(ctx, importedTransaction); err != nil {
 			return err
 		}
+		transactionContext.RecordEventsOf(importedTransaction)
 	}
 	if !balanceApplied {
 		return nil
 	}
+	transactionContext.RecordEventsOf(targetAccount)
 	return u.accounts.Save(ctx, targetAccount)
 }
 

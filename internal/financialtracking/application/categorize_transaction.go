@@ -9,6 +9,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // CategorizeTransactionInput é a entrada da categorização. AssignedBy chega
@@ -32,14 +33,15 @@ type CategorizeTransactionOutput struct {
 // CategorizeTransactionUseCase atribui (ou troca) a categoria de uma
 // transação. Duas dependências: a transação (lê e grava) e a categoria (só
 // LÊ — pra garantir que existe e é do usuário). O Categorized que o root
-// emite sai pelo Save do repositório, na mesma transação da escrita.
+// emite vai para o outbox na mesma transação da escrita.
 type CategorizeTransactionUseCase struct {
-	transactions transaction.Repository
-	categories   category.Repository
+	transactions      transaction.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-func NewCategorizeTransactionUseCase(transactions transaction.Repository, categories category.Repository) *CategorizeTransactionUseCase {
-	return &CategorizeTransactionUseCase{transactions: transactions, categories: categories}
+func NewCategorizeTransactionUseCase(transactions transaction.Repository, categories category.Repository, transactionRunner *kernel.TransactionRunner) *CategorizeTransactionUseCase {
+	return &CategorizeTransactionUseCase{transactions: transactions, categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute orquestra a categorização: resolve identidades, carrega os dois
@@ -90,7 +92,7 @@ func (u *CategorizeTransactionUseCase) Execute(ctx context.Context, input Catego
 		return CategorizeTransactionOutput{}, err
 	}
 
-	if err := u.transactions.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return CategorizeTransactionOutput{}, err
 	}
 
@@ -116,4 +118,11 @@ func toCategorizeTransactionOutput(target *transaction.Transaction) (CategorizeT
 		AssignedBy:    assignedBy.String(),
 		AssignedAt:    assignment.AssignedAt(),
 	}, nil
+}
+
+func (u *CategorizeTransactionUseCase) save(ctx context.Context, target *transaction.Transaction) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(target)
+		return u.transactions.Save(ctx, target)
+	})
 }

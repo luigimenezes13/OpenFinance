@@ -20,6 +20,7 @@ type categorizeScenario struct {
 	targetCategory *category.Category
 	transactions   *fakeTransactions
 	categories     *fakeCategories
+	outbox         *fakeOutbox
 	useCase        *application.CategorizeTransactionUseCase
 }
 
@@ -31,6 +32,7 @@ func newCategorizeScenario(t *testing.T, transactionOwner uuid.UUID, categoryOwn
 	targetCategory := newCategory(t, categoryOwner, "Food")
 	transactions := newFakeTransactions(target)
 	categories := newFakeCategories(targetCategory)
+	outbox := &fakeOutbox{}
 
 	return categorizeScenario{
 		ownerID:        transactionOwner,
@@ -38,7 +40,8 @@ func newCategorizeScenario(t *testing.T, transactionOwner uuid.UUID, categoryOwn
 		targetCategory: targetCategory,
 		transactions:   transactions,
 		categories:     categories,
-		useCase:        application.NewCategorizeTransactionUseCase(transactions, categories),
+		outbox:         outbox,
+		useCase:        application.NewCategorizeTransactionUseCase(transactions, categories, newTransactionRunner(&fakeUnitOfWork{}, outbox)),
 	}
 }
 
@@ -56,7 +59,7 @@ func (s categorizeScenario) validInput() application.CategorizeTransactionInput 
 func TestCategorizeTransaction(t *testing.T) {
 	t.Parallel()
 
-	t.Run("should save the categorized transaction with the Categorized event and only read the category", func(t *testing.T) {
+	t.Run("should save the categorized transaction, record the Categorized event and only read the category", func(t *testing.T) {
 		t.Parallel()
 
 		ownerID := uuid.New()
@@ -72,12 +75,12 @@ func TestCategorizeTransaction(t *testing.T) {
 		assert.Equal(t, "user", output.AssignedBy)
 		assert.False(t, output.AssignedAt.IsZero())
 		require.Len(t, scenario.transactions.saved, 1, "the categorized transaction must be persisted")
-		assert.Equal(t, []string{transaction.EventTypeCategorized}, scenario.transactions.savedEventNames())
-		assert.Empty(t, scenario.target.Events(), "the save clears the recorded events")
+		assert.Equal(t, []string{transaction.EventTypeCategorized}, scenario.outbox.recordedEventNames())
+		assert.Empty(t, scenario.target.Events(), "the commit clears the recorded events")
 		assert.Empty(t, scenario.categories.saved, "the category is only READ by this use case")
 	})
 
-	t.Run("should replace the assignment and save the Categorized event again when recategorizing so budgets learn about the change", func(t *testing.T) {
+	t.Run("should replace the assignment and record the Categorized event again when recategorizing so budgets learn about the change", func(t *testing.T) {
 		t.Parallel()
 
 		ownerID := uuid.New()
@@ -98,8 +101,8 @@ func TestCategorizeTransaction(t *testing.T) {
 		assert.Equal(t, "rule", output.AssignedBy)
 		assert.Equal(t,
 			[]string{transaction.EventTypeCategorized, transaction.EventTypeCategorized},
-			scenario.transactions.savedEventNames(),
-			"recategorizing saves the event again",
+			scenario.outbox.recordedEventNames(),
+			"recategorizing records the event again",
 		)
 	})
 }
@@ -131,7 +134,7 @@ func TestCategorizeTransactionOwnership(t *testing.T) {
 
 			require.ErrorIs(t, err, shared.ErrForbidden)
 			assert.Empty(t, scenario.transactions.saved)
-			assert.Empty(t, scenario.transactions.savedEvents)
+			assert.Empty(t, scenario.outbox.recorded)
 		})
 	}
 }
@@ -196,7 +199,7 @@ func TestCategorizeTransactionRefusal(t *testing.T) {
 
 			require.ErrorIs(t, err, testCase.wantErr)
 			assert.Empty(t, scenario.transactions.saved)
-			assert.Empty(t, scenario.transactions.savedEvents)
+			assert.Empty(t, scenario.outbox.recorded)
 		})
 	}
 }
@@ -233,7 +236,7 @@ func TestCategorizeTransactionInfrastructureFailure(t *testing.T) {
 			_, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
 
 			require.ErrorIs(t, err, errInfra)
-			assert.Empty(t, scenario.transactions.savedEvents, "no event is saved when persistence fails")
+			assert.Empty(t, scenario.outbox.recorded, "no event is recorded when persistence fails")
 		})
 	}
 
@@ -248,5 +251,19 @@ func TestCategorizeTransactionInfrastructureFailure(t *testing.T) {
 
 		require.ErrorIs(t, err, errInfra)
 		assert.Len(t, scenario.target.Events(), 1, "an unsaved event stays on the aggregate")
+	})
+
+	t.Run("should return the error and keep the Categorized event on the aggregate when the outbox fails", func(t *testing.T) {
+		t.Parallel()
+
+		ownerID := uuid.New()
+		scenario := newCategorizeScenario(t, ownerID, ownerID)
+		scenario.outbox.recordErr = errInfra
+
+		_, err := scenario.useCase.Execute(context.Background(), scenario.validInput())
+
+		require.ErrorIs(t, err, errInfra)
+		assert.Empty(t, scenario.outbox.recorded)
+		assert.Len(t, scenario.target.Events(), 1, "an event the outbox refused stays on the aggregate")
 	})
 }

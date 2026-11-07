@@ -7,6 +7,7 @@ import (
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // RenameAccountInput é a entrada da renomeação.
@@ -24,12 +25,12 @@ type RenameAccountInput struct {
 // o histórico), e saldo vem do provedor. Um endpoint de update genérico
 // convidaria justamente essas mudanças.
 type RenameAccountUseCase struct {
-	accounts account.Repository
+	accounts          account.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewRenameAccountUseCase injeta as dependências por construtor.
-func NewRenameAccountUseCase(accounts account.Repository) *RenameAccountUseCase {
-	return &RenameAccountUseCase{accounts: accounts}
+func NewRenameAccountUseCase(accounts account.Repository, transactionRunner *kernel.TransactionRunner) *RenameAccountUseCase {
+	return &RenameAccountUseCase{accounts: accounts, transactionRunner: transactionRunner}
 }
 
 // Execute carrega a conta, checa o dono e delega a renomeação ao aggregate.
@@ -58,9 +59,16 @@ func (u *RenameAccountUseCase) Execute(ctx context.Context, input RenameAccountI
 		return AccountSummary{}, err
 	}
 
-	if err := u.accounts.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return AccountSummary{}, err
 	}
 
 	return toAccountSummary(target), nil
+}
+
+func (u *RenameAccountUseCase) save(ctx context.Context, target *account.Account) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(target)
+		return u.accounts.Save(ctx, target)
+	})
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // SignInInput é a entrada: o token cru como veio no header.
@@ -40,12 +41,13 @@ type SignInOutput struct {
 // autenticação é do provedor, "existir no Google e não existir aqui" só pode
 // significar "primeiro acesso".
 type SignInUseCase struct {
-	users    identity.Repository
-	verifier identity.TokenVerifier
+	users             identity.Repository
+	verifier          identity.TokenVerifier
+	transactionRunner *kernel.TransactionRunner
 }
 
-func NewSignInUseCase(users identity.Repository, verifier identity.TokenVerifier) *SignInUseCase {
-	return &SignInUseCase{users: users, verifier: verifier}
+func NewSignInUseCase(users identity.Repository, verifier identity.TokenVerifier, transactionRunner *kernel.TransactionRunner) *SignInUseCase {
+	return &SignInUseCase{users: users, verifier: verifier, transactionRunner: transactionRunner}
 }
 
 // Execute verifica o token, constrói os VOs e resolve o usuário local:
@@ -88,14 +90,14 @@ func (u *SignInUseCase) Execute(ctx context.Context, input SignInInput) (SignInO
 	return u.signInExisting(ctx, existing, email, name, avatar)
 }
 
-// register provisiona o usuário no primeiro acesso; o Registered sai pelo Save.
+// register provisiona o usuário no primeiro acesso; o Registered vai para o outbox junto.
 func (u *SignInUseCase) register(ctx context.Context, email identity.Email, name string, avatar identity.AvatarURL, external identity.ExternalIdentity) (SignInOutput, error) {
 	registered, err := identity.Register(email, name, avatar, external)
 	if err != nil {
 		return SignInOutput{}, err
 	}
 
-	if err := u.users.Save(ctx, registered); err != nil {
+	if err := u.save(ctx, registered); err != nil {
 		return SignInOutput{}, err
 	}
 
@@ -114,7 +116,7 @@ func (u *SignInUseCase) signInExisting(ctx context.Context, existing *identity.U
 	}
 
 	if changed {
-		if err := u.users.Save(ctx, existing); err != nil {
+		if err := u.save(ctx, existing); err != nil {
 			return SignInOutput{}, err
 		}
 	}
@@ -161,4 +163,11 @@ func toSignInOutput(user *identity.User, registered bool) SignInOutput {
 		Name:       user.Name(),
 		Registered: registered,
 	}
+}
+
+func (u *SignInUseCase) save(ctx context.Context, user *identity.User) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(user)
+		return u.users.Save(ctx, user)
+	})
 }

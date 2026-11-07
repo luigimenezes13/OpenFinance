@@ -33,6 +33,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 	"github.com/luigimenezes13/financial-manager/internal/platform/httperror"
 )
@@ -44,26 +45,7 @@ func TestMain(main *testing.M) {
 	main.Run()
 }
 
-// recordedEvents mirrors what the real repositories do inside Save: the
-// aggregate's pending events go to the outbox and are cleared afterwards.
-type recordedEvents struct {
-	savedEvents []events.Event
-}
-
-func (r *recordedEvents) record(pending []events.Event) {
-	r.savedEvents = append(r.savedEvents, pending...)
-}
-
-func (r *recordedEvents) savedEventNames() []string {
-	names := make([]string, 0, len(r.savedEvents))
-	for _, saved := range r.savedEvents {
-		names = append(names, saved.EventName())
-	}
-	return names
-}
-
 type fakeAccounts struct {
-	recordedEvents
 	stored  map[string]*account.Account
 	saveErr error
 	findErr error
@@ -82,8 +64,6 @@ func (f *fakeAccounts) Save(_ context.Context, target *account.Account) error {
 		return f.saveErr
 	}
 	f.stored[target.ID().String()] = target
-	f.record(target.Events())
-	target.ClearEvents()
 	return nil
 }
 
@@ -115,7 +95,6 @@ func (f *fakeAccounts) ListByUser(_ context.Context, userID shared.UserID) ([]*a
 }
 
 type fakeTransactions struct {
-	recordedEvents
 	stored  map[string]*transaction.Transaction
 	saveErr error
 	listErr error
@@ -134,8 +113,6 @@ func (f *fakeTransactions) Save(_ context.Context, target *transaction.Transacti
 		return f.saveErr
 	}
 	f.stored[target.ID().String()] = target
-	f.record(target.Events())
-	target.ClearEvents()
 	return nil
 }
 
@@ -233,6 +210,23 @@ func (passThroughUnitOfWork) Run(ctx context.Context, work func(ctx context.Cont
 	return work(ctx)
 }
 
+type fakeOutbox struct {
+	recorded []events.Event
+}
+
+func (f *fakeOutbox) Record(_ context.Context, recorded ...events.Event) error {
+	f.recorded = append(f.recorded, recorded...)
+	return nil
+}
+
+func (f *fakeOutbox) recordedEventNames() []string {
+	names := make([]string, 0, len(f.recorded))
+	for _, recorded := range f.recorded {
+		names = append(names, recorded.EventName())
+	}
+	return names
+}
+
 type fakeProvider struct {
 	name         string
 	transactions []openfinance.ProviderTransaction
@@ -269,6 +263,7 @@ type testServer struct {
 	categories   *fakeCategories
 	provider     *fakeProvider
 	pinger       *fakePinger
+	outbox       *fakeOutbox
 }
 
 func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
@@ -280,12 +275,14 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		categories:   newFakeCategories(),
 		provider:     &fakeProvider{name: "mock"},
 		pinger:       &fakePinger{},
+		outbox:       &fakeOutbox{},
 	}
 	for _, option := range options {
 		option(server)
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	transactionRunner := kernel.NewTransactionRunner(passThroughUnitOfWork{}, server.outbox)
 
 	router := gin.New()
 	ginhandler.RegisterRoutes(
@@ -293,27 +290,27 @@ func newTestServer(t *testing.T, options ...func(*testServer)) *testServer {
 		server.pinger,
 		stubAuthenticate(),
 		ginhandler.NewAccountHandler(
-			application.NewCreateAccountUseCase(server.accounts),
+			application.NewCreateAccountUseCase(server.accounts, transactionRunner),
 			application.NewListAccountsUseCase(server.accounts),
 			application.NewViewAccountUseCase(server.accounts),
-			application.NewRenameAccountUseCase(server.accounts),
+			application.NewRenameAccountUseCase(server.accounts, transactionRunner),
 			logger,
 		),
 		ginhandler.NewTransactionHandler(
-			application.NewRecordTransactionUseCase(server.transactions, server.accounts),
-			application.NewCategorizeTransactionUseCase(server.transactions, server.categories),
-			application.NewImportFromProviderUseCase(server.transactions, server.accounts, server.provider, passThroughUnitOfWork{}),
+			application.NewRecordTransactionUseCase(server.transactions, server.accounts, transactionRunner),
+			application.NewCategorizeTransactionUseCase(server.transactions, server.categories, transactionRunner),
+			application.NewImportFromProviderUseCase(server.transactions, server.accounts, server.provider, transactionRunner),
 			application.NewListTransactionsUseCase(server.transactions),
 			application.NewViewTransactionUseCase(server.transactions),
 			logger,
 		),
 		ginhandler.NewCategoryHandler(
-			application.NewCreateCategoryUseCase(server.categories),
+			application.NewCreateCategoryUseCase(server.categories, transactionRunner),
 			application.NewListCategoriesUseCase(server.categories),
-			application.NewRenameCategoryUseCase(server.categories),
-			application.NewMoveCategoryUseCase(server.categories),
-			application.NewAddCategoryRuleUseCase(server.categories),
-			application.NewRemoveCategoryRuleUseCase(server.categories),
+			application.NewRenameCategoryUseCase(server.categories, transactionRunner),
+			application.NewMoveCategoryUseCase(server.categories, transactionRunner),
+			application.NewAddCategoryRuleUseCase(server.categories, transactionRunner),
+			application.NewRemoveCategoryRuleUseCase(server.categories, transactionRunner),
 			logger,
 		),
 	)

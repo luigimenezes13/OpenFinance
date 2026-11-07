@@ -75,3 +75,5 @@ func (r *Recorder) deliveriesFor(envelope events.Envelope) []river.InsertManyPar
 	}
 	return deliveries
 }
+
+var _ events.Outbox = (*Recorder)(nil)

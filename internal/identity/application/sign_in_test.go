@@ -10,19 +10,17 @@ import (
 
 	"github.com/luigimenezes13/financial-manager/internal/identity/application"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
 var errInfra = errors.New("fake: infrastructure failure")
 
-// fakeUsers behaves like the real repository: a successful Save records the
-// aggregate's pending events and clears them; a failing Save keeps them.
 type fakeUsers struct {
-	stored      map[string]*identity.User
-	saved       []*identity.User
-	savedEvents []events.Event
-	saveErr     error
-	findErr     error
+	stored  map[string]*identity.User
+	saved   []*identity.User
+	saveErr error
+	findErr error
 }
 
 func newFakeUsers(stored ...*identity.User) *fakeUsers {
@@ -43,8 +41,6 @@ func (f *fakeUsers) Save(_ context.Context, user *identity.User) error {
 	}
 	f.stored[externalKey(user.ExternalIdentity())] = user
 	f.saved = append(f.saved, user)
-	f.savedEvents = append(f.savedEvents, user.Events()...)
-	user.ClearEvents()
 	return nil
 }
 
@@ -69,6 +65,28 @@ func (f *fakeUsers) FindByExternalIdentity(_ context.Context, external identity.
 		return nil, identity.ErrNotFound
 	}
 	return found, nil
+}
+
+type fakeUnitOfWork struct{}
+
+func (fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
+	return work(ctx)
+}
+
+// fakeOutbox captures the events the transaction runner records. When
+// recordErr is set it records nothing and fails, like an outbox insert that
+// breaks inside the unit of work.
+type fakeOutbox struct {
+	recorded  []events.Event
+	recordErr error
+}
+
+func (f *fakeOutbox) Record(_ context.Context, recorded ...events.Event) error {
+	if f.recordErr != nil {
+		return f.recordErr
+	}
+	f.recorded = append(f.recorded, recorded...)
+	return nil
 }
 
 type fakeVerifier struct {
@@ -112,7 +130,12 @@ func mustUser(t *testing.T, verified identity.VerifiedIdentity) *identity.User {
 }
 
 func signIn(users *fakeUsers, verifier *fakeVerifier, rawToken string) (application.SignInOutput, error) {
-	useCase := application.NewSignInUseCase(users, verifier)
+	return signInRecordingTo(&fakeOutbox{}, users, verifier, rawToken)
+}
+
+func signInRecordingTo(outbox *fakeOutbox, users *fakeUsers, verifier *fakeVerifier, rawToken string) (application.SignInOutput, error) {
+	transactionRunner := kernel.NewTransactionRunner(fakeUnitOfWork{}, outbox)
+	useCase := application.NewSignInUseCase(users, verifier, transactionRunner)
 	return useCase.Execute(context.Background(), application.SignInInput{RawToken: rawToken})
 }
 
@@ -124,8 +147,9 @@ func TestSignIn(t *testing.T) {
 
 		users := newFakeUsers()
 		verifier := &fakeVerifier{verified: googleIdentity()}
+		outbox := &fakeOutbox{}
 
-		output, err := signIn(users, verifier, "token-abc")
+		output, err := signInRecordingTo(outbox, users, verifier, "token-abc")
 
 		require.NoError(t, err)
 		assert.True(t, output.Registered, "first access registers")
@@ -134,9 +158,9 @@ func TestSignIn(t *testing.T) {
 		assert.NotEmpty(t, output.UserID)
 		assert.Equal(t, "token-abc", verifier.calledWithToken)
 		require.Len(t, users.saved, 1)
-		require.Len(t, users.savedEvents, 1, "registration saves the event")
-		assert.Equal(t, identity.EventTypeRegistered, users.savedEvents[0].EventName())
-		assert.Empty(t, users.saved[0].Events(), "the save clears the recorded events")
+		require.Len(t, outbox.recorded, 1, "registration records the event")
+		assert.Equal(t, identity.EventTypeRegistered, outbox.recorded[0].EventName())
+		assert.Empty(t, users.saved[0].Events(), "the commit clears the recorded events")
 	})
 
 	t.Run("should neither register nor save when an unchanged user signs in again", func(t *testing.T) {
@@ -145,14 +169,15 @@ func TestSignIn(t *testing.T) {
 		verified := googleIdentity()
 		existing := mustUser(t, verified)
 		users := newFakeUsers(existing)
+		outbox := &fakeOutbox{}
 
-		output, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
+		output, err := signInRecordingTo(outbox, users, &fakeVerifier{verified: verified}, "token-abc")
 
 		require.NoError(t, err)
 		assert.False(t, output.Registered)
 		assert.Equal(t, existing.ID().String(), output.UserID, "it is the SAME local user")
 		assert.Empty(t, users.saved, "nothing changed, nothing to save")
-		assert.Empty(t, users.savedEvents, "registration happens only once")
+		assert.Empty(t, outbox.recorded, "registration happens only once")
 	})
 
 	t.Run("should sync the profile updated at the provider and keep the local user id", func(t *testing.T) {
@@ -207,12 +232,13 @@ func TestSignIn(t *testing.T) {
 		verified := googleIdentity()
 		verified.EmailVerified = false
 		users := newFakeUsers()
+		outbox := &fakeOutbox{}
 
-		_, err := signIn(users, &fakeVerifier{verified: verified}, "token-abc")
+		_, err := signInRecordingTo(outbox, users, &fakeVerifier{verified: verified}, "token-abc")
 
 		require.ErrorIs(t, err, identity.ErrEmailNotVerified)
 		assert.Empty(t, users.saved, "no user is created")
-		assert.Empty(t, users.savedEvents)
+		assert.Empty(t, outbox.recorded)
 	})
 
 	t.Run("should sync the avatar changed at the provider", func(t *testing.T) {
@@ -353,16 +379,33 @@ func TestSignInInfrastructureFailure(t *testing.T) {
 		require.ErrorIs(t, err, errInfra)
 	})
 
-	t.Run("should save no event when saving the new user fails", func(t *testing.T) {
+	t.Run("should record no event when saving the new user fails", func(t *testing.T) {
 		t.Parallel()
 
 		users := newFakeUsers()
 		users.saveErr = errInfra
+		outbox := &fakeOutbox{}
 
-		_, err := signIn(users, &fakeVerifier{verified: googleIdentity()}, "token-abc")
+		_, err := signInRecordingTo(outbox, users, &fakeVerifier{verified: googleIdentity()}, "token-abc")
 
 		require.ErrorIs(t, err, errInfra)
 		assert.Empty(t, users.saved)
-		assert.Empty(t, users.savedEvents, "no event is saved when persistence fails")
+		assert.Empty(t, outbox.recorded, "no event is recorded when persistence fails")
+	})
+
+	t.Run("should return the error and keep the Registered event on the user when the outbox fails", func(t *testing.T) {
+		t.Parallel()
+
+		users := newFakeUsers()
+		outbox := &fakeOutbox{recordErr: errInfra}
+
+		_, err := signInRecordingTo(outbox, users, &fakeVerifier{verified: googleIdentity()}, "token-abc")
+
+		require.ErrorIs(t, err, errInfra)
+		assert.Empty(t, outbox.recorded)
+		require.Len(t, users.saved, 1)
+		registered := users.saved[0]
+		require.Len(t, registered.Events(), 1, "an event the outbox refused stays on the aggregate")
+		assert.Equal(t, identity.EventTypeRegistered, registered.Events()[0].EventName())
 	})
 }

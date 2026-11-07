@@ -48,7 +48,7 @@ func TestAccountRepositoryIntegration(t *testing.T) {
 
 	t.Run("should round-trip the aggregate with the balance instant truncated to Postgres microsecond precision", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		original := mustManualAccount(t, uuid.New())
 
 		require.NoError(t, repository.Save(ctx, original))
@@ -69,9 +69,9 @@ func TestAccountRepositoryIntegration(t *testing.T) {
 		assert.WithinDuration(t, originalSnapshot.BalanceAsOf, foundSnapshot.BalanceAsOf, time.Millisecond)
 	})
 
-	t.Run("should upsert the same row, keep created_at immutable and move the pending event to the outbox", func(t *testing.T) {
+	t.Run("should upsert the same row and keep created_at immutable", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		target := mustManualAccount(t, uuid.New())
 		require.NoError(t, repository.Save(ctx, target))
 
@@ -103,14 +103,11 @@ func TestAccountRepositoryIntegration(t *testing.T) {
 			Scan(&createdAtAfter, &updatedAtAfter))
 		assert.WithinDuration(t, createdAtBefore, createdAtAfter, time.Microsecond, "created_at does not change on update")
 		assert.True(t, updatedAtAfter.After(createdAtAfter) || updatedAtAfter.Equal(createdAtAfter), "updated_at follows the write")
-
-		assert.Empty(t, target.Events(), "a successful save hands the pending events to the outbox")
-		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, queuedEventNames(t))
 	})
 
 	t.Run("should round-trip an open finance source and reject a second account for the same provider account", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		source, err := account.NewOpenFinanceSource("pluggy", "pluggy-acc-77")
 		require.NoError(t, err)
 		connected, err := account.New(mustUserID(t, uuid.New()), "Connected Account", account.KindCreditCard, mustCurrency(t, "BRL"), source)
@@ -136,29 +133,9 @@ func TestAccountRepositoryIntegration(t *testing.T) {
 			"two local accounts for the same provider account must fail")
 	})
 
-	t.Run("should queue nothing and keep the pending events when the upsert fails", func(t *testing.T) {
-		truncateAll(t)
-		repository := newAccountRepository(t)
-		source, err := account.NewOpenFinanceSource("pluggy", "pluggy-acc-88")
-		require.NoError(t, err)
-		original, err := account.New(mustUserID(t, uuid.New()), "Original", account.KindChecking, mustCurrency(t, "BRL"), source)
-		require.NoError(t, err)
-		require.NoError(t, repository.Save(ctx, original))
-		duplicate, err := account.New(mustUserID(t, uuid.New()), "Duplicate", account.KindChecking, mustCurrency(t, "BRL"), source)
-		require.NoError(t, err)
-		newBalance, err := account.NewBalance(mustMoneyBRL(t, 500_00), time.Now())
-		require.NoError(t, err)
-		require.NoError(t, duplicate.UpdateBalance(newBalance))
-
-		require.Error(t, repository.Save(ctx, duplicate))
-
-		assert.Empty(t, queuedEventNames(t))
-		assert.Len(t, duplicate.Events(), 1)
-	})
-
 	t.Run("should let manual accounts coexist because the provider unique index is partial", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		ownerID := uuid.New()
 
 		require.NoError(t, repository.Save(ctx, mustManualAccount(t, ownerID)))
@@ -171,7 +148,7 @@ func TestAccountRepositoryIntegration(t *testing.T) {
 
 	t.Run("should translate a missing row into the aggregate not found sentinel", func(t *testing.T) {
 		truncateAll(t)
-		repository := newAccountRepository(t)
+		repository := newAccountRepository()
 		missingID, err := account.AccountIDFromUUID(uuid.New())
 		require.NoError(t, err)
 

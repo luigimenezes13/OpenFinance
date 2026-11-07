@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // RemoveCategoryRuleInput é a entrada da remoção de regra.
@@ -17,12 +18,12 @@ type RemoveCategoryRuleInput struct {
 
 // RemoveCategoryRuleUseCase remove uma regra da categoria.
 type RemoveCategoryRuleUseCase struct {
-	categories category.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewRemoveCategoryRuleUseCase injeta as dependências por construtor.
-func NewRemoveCategoryRuleUseCase(categories category.Repository) *RemoveCategoryRuleUseCase {
-	return &RemoveCategoryRuleUseCase{categories: categories}
+func NewRemoveCategoryRuleUseCase(categories category.Repository, transactionRunner *kernel.TransactionRunner) *RemoveCategoryRuleUseCase {
+	return &RemoveCategoryRuleUseCase{categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute carrega a categoria, checa o dono e remove a regra.
@@ -46,9 +47,15 @@ func (u *RemoveCategoryRuleUseCase) Execute(ctx context.Context, input RemoveCat
 		return CategorySummary{}, err
 	}
 
-	if err := u.categories.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return CategorySummary{}, err
 	}
 
 	return toCategorySummary(target), nil
+}
+
+func (u *RemoveCategoryRuleUseCase) save(ctx context.Context, target *category.Category) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, _ kernel.TransactionContext) error {
+		return u.categories.Save(ctx, target)
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // AddCategoryRuleInput é a entrada da criação de regra.
@@ -23,12 +24,12 @@ type AddCategoryRuleInput struct {
 // e quando o motor entrar ele encontra os dados prontos em vez de exigir que
 // todo mundo recadastre.
 type AddCategoryRuleUseCase struct {
-	categories category.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewAddCategoryRuleUseCase injeta as dependências por construtor.
-func NewAddCategoryRuleUseCase(categories category.Repository) *AddCategoryRuleUseCase {
-	return &AddCategoryRuleUseCase{categories: categories}
+func NewAddCategoryRuleUseCase(categories category.Repository, transactionRunner *kernel.TransactionRunner) *AddCategoryRuleUseCase {
+	return &AddCategoryRuleUseCase{categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute carrega a categoria, checa o dono e adiciona a regra.
@@ -49,9 +50,15 @@ func (u *AddCategoryRuleUseCase) Execute(ctx context.Context, input AddCategoryR
 		return CategorySummary{}, err
 	}
 
-	if err := u.categories.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return CategorySummary{}, err
 	}
 
 	return toCategorySummary(target), nil
+}
+
+func (u *AddCategoryRuleUseCase) save(ctx context.Context, target *category.Category) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, _ kernel.TransactionContext) error {
+		return u.categories.Save(ctx, target)
+	})
 }

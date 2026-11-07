@@ -54,10 +54,6 @@ func TestMain(main *testing.M) {
 		fmt.Printf("failed to apply migrations: %v\n", err)
 		os.Exit(1)
 	}
-	if err := createProbeDeliveries(ctx, database); err != nil {
-		fmt.Printf("failed to create the probe deliveries table: %v\n", err)
-		os.Exit(1)
-	}
 
 	code := main.Run()
 	_ = testClient.Close()
@@ -72,7 +68,7 @@ func TestMain(main *testing.M) {
 // lives behind a test build tag.
 func resetSchema(ctx context.Context, database *sql.DB) error {
 	_, err := database.ExecContext(ctx,
-		`DROP TABLE IF EXISTS transactions, category_rules, categories, accounts, `+probeDeliveriesTable+` CASCADE`)
+		`DROP TABLE IF EXISTS transactions, category_rules, categories, accounts CASCADE`)
 	return err
 }
 
@@ -119,7 +115,7 @@ func truncateAll(t *testing.T) {
 	t.Helper()
 
 	_, err := testDB.ExecContext(context.Background(),
-		`TRUNCATE transactions, category_rules, categories, accounts, `+probeDeliveriesTable)
+		`TRUNCATE transactions, category_rules, categories, accounts`)
 	if err != nil {
 		t.Fatalf("failed to truncate tables: %v", err)
 	}
