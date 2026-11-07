@@ -7,6 +7,7 @@ import (
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // CreateAccountInput é a entrada do use case. UserID chega como uuid.UUID já
@@ -39,12 +40,12 @@ type CreateAccountOutput struct {
 // (nascer zerada não é mudança de saldo), então não haveria nada a
 // despachar. Injetar um dispatcher aqui seria dependência morta.
 type CreateAccountUseCase struct {
-	accounts account.Repository
+	accounts          account.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewCreateAccountUseCase injeta as dependências por construtor.
-func NewCreateAccountUseCase(accounts account.Repository) *CreateAccountUseCase {
-	return &CreateAccountUseCase{accounts: accounts}
+func NewCreateAccountUseCase(accounts account.Repository, transactionRunner *kernel.TransactionRunner) *CreateAccountUseCase {
+	return &CreateAccountUseCase{accounts: accounts, transactionRunner: transactionRunner}
 }
 
 // Execute orquestra a criação da conta manual. Mesmo esqueleto do
@@ -84,7 +85,7 @@ func (u *CreateAccountUseCase) Execute(ctx context.Context, input CreateAccountI
 		return CreateAccountOutput{}, err
 	}
 
-	if err := u.accounts.Save(ctx, acc); err != nil {
+	if err := u.save(ctx, acc); err != nil {
 		return CreateAccountOutput{}, err
 	}
 
@@ -109,4 +110,11 @@ func toAccountOutput(acc *account.Account) CreateAccountOutput {
 		Balance:  money.Amount(),
 		Currency: currency.Code(),
 	}
+}
+
+func (u *CreateAccountUseCase) save(ctx context.Context, target *account.Account) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionContext kernel.TransactionContext) error {
+		transactionContext.RecordEventsOf(target)
+		return u.accounts.Save(ctx, target)
+	})
 }

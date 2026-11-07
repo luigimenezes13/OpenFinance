@@ -51,10 +51,6 @@ func TestMain(main *testing.M) {
 		fmt.Printf("failed to apply migrations: %v\n", err)
 		os.Exit(1)
 	}
-	if err := createProbeDeliveries(ctx, database); err != nil {
-		fmt.Printf("failed to create the probe deliveries table: %v\n", err)
-		os.Exit(1)
-	}
 
 	code := main.Run()
 	_ = testClient.Close()
@@ -67,7 +63,7 @@ func TestMain(main *testing.M) {
 // `go test ./...` runs packages in parallel, so it would wipe the other
 // context's tables in the middle of its tests.
 func resetSchema(ctx context.Context, database *sql.DB) error {
-	_, err := database.ExecContext(ctx, `DROP TABLE IF EXISTS users, `+probeDeliveriesTable+` CASCADE`)
+	_, err := database.ExecContext(ctx, `DROP TABLE IF EXISTS users CASCADE`)
 	return err
 }
 
@@ -111,7 +107,7 @@ func sqlFileNames(entries []os.DirEntry) []string {
 func truncateUsers(t *testing.T) {
 	t.Helper()
 
-	if _, err := testDB.ExecContext(context.Background(), `TRUNCATE users, `+probeDeliveriesTable); err != nil {
+	if _, err := testDB.ExecContext(context.Background(), `TRUNCATE users`); err != nil {
 		t.Fatalf("failed to truncate tables: %v", err)
 	}
 }

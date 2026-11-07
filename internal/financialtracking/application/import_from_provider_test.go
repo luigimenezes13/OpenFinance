@@ -35,6 +35,7 @@ type importScenario struct {
 	transactions *fakeTransactions
 	provider     *fakeProvider
 	unitOfWork   *fakeUnitOfWork
+	outbox       *fakeOutbox
 }
 
 func newImportScenario(t *testing.T) importScenario {
@@ -49,6 +50,7 @@ func newImportScenario(t *testing.T) importScenario {
 		transactions: newFakeTransactions(),
 		provider:     &fakeProvider{name: "pluggy"},
 		unitOfWork:   &fakeUnitOfWork{},
+		outbox:       &fakeOutbox{},
 	}
 }
 
@@ -58,7 +60,7 @@ func (s importScenario) execute() (application.ImportFromProviderOutput, error) 
 }
 
 func (s importScenario) executeFor(input application.ImportFromProviderInput) (application.ImportFromProviderOutput, error) {
-	useCase := application.NewImportFromProviderUseCase(s.transactions, s.accounts, s.provider, s.unitOfWork)
+	useCase := application.NewImportFromProviderUseCase(s.transactions, s.accounts, s.provider, newTransactionRunner(s.unitOfWork, s.outbox))
 	return useCase.Execute(context.Background(), input)
 }
 
@@ -66,8 +68,7 @@ func (s importScenario) assertNothingSaved(t *testing.T) {
 	t.Helper()
 	assert.Empty(t, s.transactions.saved, "no transaction is saved")
 	assert.Empty(t, s.accounts.saved, "the account is not saved")
-	assert.Empty(t, s.transactions.savedEvents)
-	assert.Empty(t, s.accounts.savedEvents)
+	assert.Empty(t, s.outbox.recorded, "no event is recorded")
 }
 
 func TestImportFromProvider(t *testing.T) {
@@ -100,13 +101,13 @@ func TestImportFromProvider(t *testing.T) {
 		assert.Equal(t, 1, scenario.unitOfWork.runs, "everything is saved in a single unit of work")
 		require.Len(t, scenario.transactions.saved, 2)
 		assert.Equal(t,
-			[]string{transaction.EventTypeImported, transaction.EventTypeImported},
-			scenario.transactions.savedEventNames(),
-			"each imported transaction saves its Imported event",
+			[]string{transaction.EventTypeImported, transaction.EventTypeImported, account.EventTypeBalanceUpdated},
+			scenario.outbox.recordedEventNames(),
+			"each imported transaction records its Imported event and the provider balance records BalanceUpdated",
 		)
-		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames(), "the provider balance saves BalanceUpdated")
 		imported := scenario.transactions.saved[0]
-		assert.Empty(t, imported.Events(), "the save clears the recorded events")
+		assert.Empty(t, imported.Events(), "the commit clears the recorded events")
+		assert.Empty(t, scenario.connected.Events(), "the commit clears the account events")
 		importedRef, ok := imported.ExternalRef()
 		require.True(t, ok, "a provider transaction is born with an external reference")
 		assert.Equal(t, "pluggy", importedRef.Provider())
@@ -142,7 +143,7 @@ func TestImportFromProvider(t *testing.T) {
 		assert.Empty(t, output.TransactionIDs, "an empty list is a legitimate result, not an error")
 		assert.Empty(t, scenario.transactions.saved)
 		assert.True(t, scenario.provider.calledSince.IsZero(), "a zero Since means the whole history")
-		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames())
+		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.outbox.recordedEventNames())
 		assert.True(t, output.BalanceApplied)
 	})
 
@@ -162,7 +163,7 @@ func TestImportFromProvider(t *testing.T) {
 		money := balance.Money()
 		assert.Equal(t, int64(1_234_56), money.Amount())
 		require.Len(t, scenario.accounts.saved, 1, "an account with a new balance is persisted")
-		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.accounts.savedEventNames())
+		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, scenario.outbox.recordedEventNames())
 	})
 
 	t.Run("should accept a negative balance because card debt is negative in the net-worth convention", func(t *testing.T) {
@@ -199,7 +200,7 @@ func TestImportFromProvider(t *testing.T) {
 		money := balance.Money()
 		assert.Equal(t, int64(500_00), money.Amount(), "the most recent balance is preserved")
 		assert.Empty(t, scenario.accounts.saved, "nothing to persist")
-		assert.Empty(t, scenario.accounts.savedEvents, "nothing happened, no event")
+		assert.Empty(t, scenario.outbox.recorded, "nothing happened, no event")
 	})
 }
 
@@ -323,6 +324,23 @@ func TestImportFromProviderAllOrNothing(t *testing.T) {
 		require.ErrorIs(t, err, errInfra)
 		assert.Equal(t, 1, scenario.unitOfWork.runs)
 		scenario.assertNothingSaved(t)
+	})
+
+	t.Run("should return the error and keep the events on the aggregates when the outbox fails", func(t *testing.T) {
+		t.Parallel()
+
+		scenario := newImportScenario(t)
+		scenario.provider.transactions = []openfinance.ProviderTransaction{providerTransaction("tx-1", -1000, "Taxi")}
+		scenario.outbox.recordErr = errInfra
+
+		_, err := scenario.execute()
+
+		require.ErrorIs(t, err, errInfra)
+		assert.Empty(t, scenario.outbox.recorded)
+		require.Len(t, scenario.transactions.saved, 1)
+		imported := scenario.transactions.saved[0]
+		assert.Len(t, imported.Events(), 1, "the Imported event stays on the transaction for a retry")
+		assert.Len(t, scenario.connected.Events(), 1, "the BalanceUpdated event stays on the account for a retry")
 	})
 }
 

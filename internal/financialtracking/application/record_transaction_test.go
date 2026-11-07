@@ -18,7 +18,7 @@ import (
 func TestRecordTransaction(t *testing.T) {
 	t.Parallel()
 
-	t.Run("should save an outflow that inherits the account currency and saves no event", func(t *testing.T) {
+	t.Run("should save an outflow that inherits the account currency and records no event", func(t *testing.T) {
 		t.Parallel()
 
 		ownerID := uuid.New()
@@ -26,7 +26,8 @@ func TestRecordTransaction(t *testing.T) {
 		accountID := targetAccount.ID()
 		accounts := newFakeAccounts(targetAccount)
 		transactions := newFakeTransactions()
-		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		outbox := &fakeOutbox{}
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts, newTransactionRunner(&fakeUnitOfWork{}, outbox))
 		occurredAt := time.Now().Add(-2 * time.Hour)
 
 		output, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
@@ -44,7 +45,7 @@ func TestRecordTransaction(t *testing.T) {
 		assert.Equal(t, accountID.String(), output.AccountID)
 		assert.WithinDuration(t, occurredAt, output.OccurredAt, time.Second)
 		require.Len(t, transactions.saved, 1)
-		assert.Empty(t, transactions.savedEvents, "a manual entry saves no event, only the provider flow does")
+		assert.Empty(t, outbox.recorded, "a manual entry records no event, only the provider flow does")
 		savedBalance := targetAccount.Balance()
 		savedMoney := savedBalance.Money()
 		assert.Zero(t, savedMoney.Amount(), "recording does not touch the balance")
@@ -57,7 +58,7 @@ func TestRecordTransaction(t *testing.T) {
 		otherAccount := newManualAccount(t, uuid.New(), "BRL")
 		accounts := newFakeAccounts(otherAccount)
 		transactions := newFakeTransactions()
-		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts, newPassThroughRunner())
 		accountID := otherAccount.ID()
 
 		_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
@@ -97,7 +98,8 @@ func TestRecordTransactionNeverTouchesBalance(t *testing.T) {
 		targetAccount.ClearEvents()
 		accounts := newFakeAccounts(targetAccount)
 		transactions := newFakeTransactions()
-		useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+		outbox := &fakeOutbox{}
+		useCase := application.NewRecordTransactionUseCase(transactions, accounts, newTransactionRunner(&fakeUnitOfWork{}, outbox))
 
 		for _, amount := range []int64{-45_50, -120_00, 300_00} {
 			_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
@@ -116,7 +118,7 @@ func TestRecordTransactionNeverTouchesBalance(t *testing.T) {
 		assert.Equal(t, int64(1_000_00), money.Amount(), "the balance stays exactly what the provider reported")
 		assert.Empty(t, accounts.saved, "the account is not even saved again: this use case only READS it")
 		assert.Empty(t, targetAccount.Events(), "no AccountBalanceUpdated was recorded")
-		assert.Empty(t, accounts.savedEvents)
+		assert.Empty(t, outbox.recorded)
 	})
 }
 
@@ -176,7 +178,7 @@ func TestRecordTransactionRefusal(t *testing.T) {
 			accountID := targetAccount.ID()
 			accounts := newFakeAccounts(targetAccount)
 			transactions := newFakeTransactions()
-			useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+			useCase := application.NewRecordTransactionUseCase(transactions, accounts, newPassThroughRunner())
 			input := application.RecordTransactionInput{
 				UserID:      ownerID,
 				AccountID:   accountID.UUID(),
@@ -221,7 +223,7 @@ func TestRecordTransactionInfrastructureFailure(t *testing.T) {
 			accounts := newFakeAccounts(targetAccount)
 			transactions := newFakeTransactions()
 			testCase.arrange(accounts, transactions)
-			useCase := application.NewRecordTransactionUseCase(transactions, accounts)
+			useCase := application.NewRecordTransactionUseCase(transactions, accounts, newPassThroughRunner())
 
 			_, err := useCase.Execute(context.Background(), application.RecordTransactionInput{
 				UserID:      ownerID,

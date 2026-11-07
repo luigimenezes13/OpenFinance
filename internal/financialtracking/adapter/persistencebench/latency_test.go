@@ -12,13 +12,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/entrepo"
-	"github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/eventmapper"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/account"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/transaction"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
-	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
 // The experiment is split into ROUNDS: instead of running every operation of
@@ -80,24 +78,9 @@ type workload struct {
 	run            func(ctx context.Context, target implementation, prepared fixtures, index int) error
 }
 
-// newUnsubscribedWriter builds the production outbox writer with no
-// subscribers: nothing is queued, so the Ent layer is measured with its unit
-// of work but without River.
-func newUnsubscribedWriter(tb testing.TB) *outbox.AggregateWriter {
-	tb.Helper()
-
-	mappers, err := outbox.NewMappers(eventmapper.All()...)
-	if err != nil {
-		tb.Fatalf("failed to build the event mappers: %v", err)
-	}
-	recorder := outbox.NewRecorder(mappers, outbox.NewSubscriptions(), nil)
-	return outbox.NewAggregateWriter(db.NewUnitOfWork(benchDB), recorder)
-}
-
 func benchmarkImplementations(t *testing.T) []implementation {
 	t.Helper()
 
-	writer := newUnsubscribedWriter(t)
 	return []implementation{
 		{
 			name:         baselineLayer,
@@ -113,8 +96,8 @@ func benchmarkImplementations(t *testing.T) []implementation {
 		},
 		{
 			name:         "ent",
-			accounts:     entrepo.NewAccountRepository(benchClient, writer),
-			transactions: entrepo.NewTransactionRepository(benchClient, writer),
+			accounts:     entrepo.NewAccountRepository(benchClient),
+			transactions: entrepo.NewTransactionRepository(benchClient),
 			categories:   entrepo.NewCategoryRepository(benchClient, db.NewUnitOfWork(benchDB)),
 		},
 	}

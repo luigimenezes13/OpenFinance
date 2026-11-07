@@ -50,7 +50,7 @@ func prepareBenchmarkAccount(b *testing.B) account.AccountID {
 		b.Fatalf("invalid account: %v", err)
 	}
 
-	repository := entrepo.NewAccountRepository(benchClient, newUnsubscribedWriter(b))
+	repository := entrepo.NewAccountRepository(benchClient)
 	if err := repository.Save(context.Background(), created); err != nil {
 		b.Fatalf("failed to prepare the account: %v", err)
 	}
@@ -69,5 +69,5 @@ func BenchmarkFindSQLDB(b *testing.B) {
 
 func BenchmarkFindEnt(b *testing.B) {
 	accountID := prepareBenchmarkAccount(b)
-	benchmarkFind(b, entrepo.NewAccountRepository(benchClient, newUnsubscribedWriter(b)), accountID)
+	benchmarkFind(b, entrepo.NewAccountRepository(benchClient), accountID)
 }

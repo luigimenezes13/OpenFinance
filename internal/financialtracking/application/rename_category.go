@@ -7,6 +7,7 @@ import (
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // RenameCategoryInput é a entrada da renomeação.
@@ -18,12 +19,12 @@ type RenameCategoryInput struct {
 
 // RenameCategoryUseCase renomeia uma categoria do usuário.
 type RenameCategoryUseCase struct {
-	categories category.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewRenameCategoryUseCase injeta as dependências por construtor.
-func NewRenameCategoryUseCase(categories category.Repository) *RenameCategoryUseCase {
-	return &RenameCategoryUseCase{categories: categories}
+func NewRenameCategoryUseCase(categories category.Repository, transactionRunner *kernel.TransactionRunner) *RenameCategoryUseCase {
+	return &RenameCategoryUseCase{categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute carrega a categoria, checa o dono e delega ao aggregate.
@@ -37,7 +38,7 @@ func (u *RenameCategoryUseCase) Execute(ctx context.Context, input RenameCategor
 		return CategorySummary{}, err
 	}
 
-	if err := u.categories.Save(ctx, target); err != nil {
+	if err := u.save(ctx, target); err != nil {
 		return CategorySummary{}, err
 	}
 
@@ -74,4 +75,10 @@ func loadOwnedCategory(
 	}
 
 	return target, nil
+}
+
+func (u *RenameCategoryUseCase) save(ctx context.Context, target *category.Category) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, _ kernel.TransactionContext) error {
+		return u.categories.Save(ctx, target)
+	})
 }

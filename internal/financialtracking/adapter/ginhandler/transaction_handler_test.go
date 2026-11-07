@@ -153,7 +153,7 @@ func TestCategorizeTransactionEndpoint(t *testing.T) {
 		assert.Equal(t, categoryID.String(), body["category_id"])
 		assert.Equal(t, "user", body["assigned_by"], "a missing assigned_by defaults to 'user'")
 		assert.NotEmpty(t, body["assigned_at"])
-		assert.Equal(t, []string{transaction.EventTypeCategorized}, server.transactions.savedEventNames())
+		assert.Equal(t, []string{transaction.EventTypeCategorized}, server.outbox.recordedEventNames())
 	})
 }
 
@@ -233,7 +233,7 @@ func TestCategorizeTransactionEndpointRefusal(t *testing.T) {
 
 			require.Equal(t, testCase.wantStatus, recorder.Code, recorder.Body.String())
 			assert.Equal(t, testCase.wantCode, errorCode(t, recorder))
-			assert.Empty(t, server.transactions.savedEvents, "an error saves no event")
+			assert.Empty(t, server.outbox.recorded, "an error records no event")
 		})
 	}
 }
@@ -265,10 +265,9 @@ func TestImportFromProviderEndpoint(t *testing.T) {
 		assert.Len(t, body["transaction_ids"], 2)
 		assert.Len(t, server.transactions.stored, 2)
 		assert.Equal(t,
-			[]string{transaction.EventTypeImported, transaction.EventTypeImported},
-			server.transactions.savedEventNames(),
+			[]string{transaction.EventTypeImported, transaction.EventTypeImported, account.EventTypeBalanceUpdated},
+			server.outbox.recordedEventNames(),
 		)
-		assert.Equal(t, []string{account.EventTypeBalanceUpdated}, server.accounts.savedEventNames())
 	})
 
 	t.Run("should pass the optional since window to the provider", func(t *testing.T) {

@@ -12,17 +12,16 @@ import (
 
 	financialtrackingeventmapper "github.com/luigimenezes13/financial-manager/internal/financialtracking/adapter/eventmapper"
 	identityeventmapper "github.com/luigimenezes13/financial-manager/internal/identity/adapter/eventmapper"
-	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/platform/config"
 	"github.com/luigimenezes13/financial-manager/internal/platform/outbox"
 )
 
 type outboxRuntime struct {
-	writer *outbox.AggregateWriter
-	queue  *river.Client[*sql.Tx]
+	recorder *outbox.Recorder
+	queue    *river.Client[*sql.Tx]
 }
 
-func newOutbox(database *sql.DB, unitOfWork kernel.UnitOfWork, configuration config.Config, logger *slog.Logger) (outboxRuntime, error) {
+func newOutbox(database *sql.DB, configuration config.Config, logger *slog.Logger) (outboxRuntime, error) {
 	mappers, err := outbox.NewMappers(append(financialtrackingeventmapper.All(), identityeventmapper.All()...)...)
 	if err != nil {
 		return outboxRuntime{}, err
@@ -46,8 +45,7 @@ func newOutbox(database *sql.DB, unitOfWork kernel.UnitOfWork, configuration con
 		return outboxRuntime{}, err
 	}
 
-	recorder := outbox.NewRecorder(mappers, subscriptions, queue)
-	return outboxRuntime{writer: outbox.NewAggregateWriter(unitOfWork, recorder), queue: queue}, nil
+	return outboxRuntime{recorder: outbox.NewRecorder(mappers, subscriptions, queue), queue: queue}, nil
 }
 
 // start detaches the queue from ctx on purpose: cancelling the context River

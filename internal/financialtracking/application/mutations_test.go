@@ -25,7 +25,7 @@ func TestRenameAccount(t *testing.T) {
 		target := newManualAccount(t, ownerID, "BRL")
 		accountID := target.ID()
 		accounts := newFakeAccounts(target)
-		useCase := application.NewRenameAccountUseCase(accounts)
+		useCase := application.NewRenameAccountUseCase(accounts, newPassThroughRunner())
 
 		summary, err := useCase.Execute(context.Background(), application.RenameAccountInput{
 			UserID: ownerID, AccountID: accountID.UUID(), Name: "  Nubank Business  ",
@@ -42,7 +42,7 @@ func TestRenameAccount(t *testing.T) {
 		target := newManualAccount(t, ownerID, "BRL")
 		accountID := target.ID()
 		accounts := newFakeAccounts(target)
-		useCase := application.NewRenameAccountUseCase(accounts)
+		useCase := application.NewRenameAccountUseCase(accounts, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.RenameAccountInput{
 			UserID: ownerID, AccountID: accountID.UUID(), Name: "   ",
@@ -59,7 +59,7 @@ func TestRenameAccount(t *testing.T) {
 		target := newManualAccount(t, ownerID, "BRL")
 		accountID := target.ID()
 		accounts := newFakeAccounts(target)
-		useCase := application.NewRenameAccountUseCase(accounts)
+		useCase := application.NewRenameAccountUseCase(accounts, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.RenameAccountInput{
 			UserID: uuid.New(), AccountID: accountID.UUID(), Name: "Hijacked",
@@ -80,7 +80,7 @@ func TestRenameCategory(t *testing.T) {
 		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
-		useCase := application.NewRenameCategoryUseCase(categories)
+		useCase := application.NewRenameCategoryUseCase(categories, newPassThroughRunner())
 
 		summary, err := useCase.Execute(context.Background(), application.RenameCategoryInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), Name: "Meals",
@@ -105,7 +105,7 @@ func TestMoveCategory(t *testing.T) {
 		parentID := parent.ID()
 		childID := child.ID()
 		rawParent := parentID.UUID()
-		useCase := application.NewMoveCategoryUseCase(newFakeCategories(parent, child))
+		useCase := application.NewMoveCategoryUseCase(newFakeCategories(parent, child), newPassThroughRunner())
 
 		summary, err := useCase.Execute(context.Background(), application.MoveCategoryInput{
 			UserID: ownerID, CategoryID: childID.UUID(), ParentID: &rawParent,
@@ -124,7 +124,7 @@ func TestMoveCategory(t *testing.T) {
 		child := newCategory(t, ownerID, "Restaurants")
 		require.NoError(t, child.MoveTo(&parentID))
 		childID := child.ID()
-		useCase := application.NewMoveCategoryUseCase(newFakeCategories(parent, child))
+		useCase := application.NewMoveCategoryUseCase(newFakeCategories(parent, child), newPassThroughRunner())
 
 		summary, err := useCase.Execute(context.Background(), application.MoveCategoryInput{
 			UserID: ownerID, CategoryID: childID.UUID(), ParentID: nil,
@@ -141,7 +141,7 @@ func TestMoveCategory(t *testing.T) {
 		categoryID := target.ID()
 		raw := categoryID.UUID()
 		categories := newFakeCategories(target)
-		useCase := application.NewMoveCategoryUseCase(categories)
+		useCase := application.NewMoveCategoryUseCase(categories, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.MoveCategoryInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), ParentID: &raw,
@@ -163,8 +163,8 @@ func TestCategoryRules(t *testing.T) {
 		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
-		add := application.NewAddCategoryRuleUseCase(categories)
-		remove := application.NewRemoveCategoryRuleUseCase(categories)
+		add := application.NewAddCategoryRuleUseCase(categories, newPassThroughRunner())
+		remove := application.NewRemoveCategoryRuleUseCase(categories, newPassThroughRunner())
 
 		summary, err := add.Execute(context.Background(), application.AddCategoryRuleInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), Keyword: "ifood",
@@ -196,7 +196,7 @@ func TestCategoryRules(t *testing.T) {
 		target := newCategory(t, ownerID, "Food")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
-		useCase := application.NewAddCategoryRuleUseCase(categories)
+		useCase := application.NewAddCategoryRuleUseCase(categories, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.AddCategoryRuleInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), Keyword: "   ",
@@ -212,7 +212,7 @@ func TestCategoryRules(t *testing.T) {
 		target := newCategory(t, uuid.New(), "Someone Else's")
 		categoryID := target.ID()
 		categories := newFakeCategories(target)
-		useCase := application.NewAddCategoryRuleUseCase(categories)
+		useCase := application.NewAddCategoryRuleUseCase(categories, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.AddCategoryRuleInput{
 			UserID: ownerID, CategoryID: categoryID.UUID(), Keyword: "ifood",
@@ -226,7 +226,7 @@ func TestCategoryRules(t *testing.T) {
 		t.Parallel()
 
 		categories := newFakeCategories()
-		useCase := application.NewAddCategoryRuleUseCase(categories)
+		useCase := application.NewAddCategoryRuleUseCase(categories, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.AddCategoryRuleInput{
 			UserID: ownerID, CategoryID: uuid.New(), Keyword: "ifood",

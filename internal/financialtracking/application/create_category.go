@@ -16,6 +16,7 @@ import (
 
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/category"
 	"github.com/luigimenezes13/financial-manager/internal/financialtracking/domain/shared"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 )
 
 // CreateCategoryInput é a entrada do use case. UserID e ParentID chegam como
@@ -43,13 +44,12 @@ type CreateCategoryOutput struct {
 // da PORTA category.Repository (DIP): o concreto (pgx) é injetado no main,
 // nunca instanciado aqui.
 type CreateCategoryUseCase struct {
-	categories category.Repository
+	categories        category.Repository
+	transactionRunner *kernel.TransactionRunner
 }
 
-// NewCreateCategoryUseCase injeta as dependências por construtor (o único
-// papel do construtor: atribuir dependências).
-func NewCreateCategoryUseCase(categories category.Repository) *CreateCategoryUseCase {
-	return &CreateCategoryUseCase{categories: categories}
+func NewCreateCategoryUseCase(categories category.Repository, transactionRunner *kernel.TransactionRunner) *CreateCategoryUseCase {
+	return &CreateCategoryUseCase{categories: categories, transactionRunner: transactionRunner}
 }
 
 // Execute orquestra a criação: converte os uuids (já parseados na borda) nos
@@ -83,7 +83,7 @@ func (u *CreateCategoryUseCase) Execute(ctx context.Context, input CreateCategor
 		return CreateCategoryOutput{}, err
 	}
 
-	if err := u.categories.Save(ctx, cat); err != nil {
+	if err := u.save(ctx, cat); err != nil {
 		return CreateCategoryOutput{}, err
 	}
 
@@ -109,4 +109,10 @@ func toCategoryOutput(cat *category.Category) CreateCategoryOutput {
 		Name:     cat.Name(),
 		ParentID: parentID,
 	}
+}
+
+func (u *CreateCategoryUseCase) save(ctx context.Context, target *category.Category) error {
+	return u.transactionRunner.Begin(ctx, func(ctx context.Context, _ kernel.TransactionContext) error {
+		return u.categories.Save(ctx, target)
+	})
 }

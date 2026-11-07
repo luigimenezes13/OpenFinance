@@ -12,6 +12,8 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 	"github.com/luigimenezes13/financial-manager/internal/identity/application"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
+	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
 // fakeUsers is the minimal repository for testing the resolver against the
@@ -28,7 +30,6 @@ func (f *fakeUsers) Save(_ context.Context, user *identity.User) error {
 	}
 	external := user.ExternalIdentity()
 	f.stored[external.Subject()] = user
-	user.ClearEvents()
 	return nil
 }
 
@@ -45,6 +46,22 @@ func (f *fakeUsers) FindByExternalIdentity(_ context.Context, external identity.
 		return nil, identity.ErrNotFound
 	}
 	return found, nil
+}
+
+type fakeUnitOfWork struct{}
+
+func (fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
+	return work(ctx)
+}
+
+type discardingOutbox struct{}
+
+func (discardingOutbox) Record(context.Context, ...events.Event) error {
+	return nil
+}
+
+func newSignInUseCase(users *fakeUsers, verifier *fakeVerifier) *application.SignInUseCase {
+	return application.NewSignInUseCase(users, verifier, kernel.NewTransactionRunner(fakeUnitOfWork{}, discardingOutbox{}))
 }
 
 type fakeVerifier struct {
@@ -72,7 +89,7 @@ func googleIdentity() identity.VerifiedIdentity {
 func TestUserResolver(t *testing.T) {
 	t.Run("should provision the user and return the LOCAL uuid, never the provider subject", func(t *testing.T) {
 		users := &fakeUsers{}
-		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
+		useCase := newSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
 		resolve := ginmiddleware.UserResolverFrom(useCase)
 
 		userID, err := resolve(context.Background(), "token-abc")
@@ -84,7 +101,7 @@ func TestUserResolver(t *testing.T) {
 
 	t.Run("should return the same local user for every request of a session", func(t *testing.T) {
 		users := &fakeUsers{}
-		useCase := application.NewSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
+		useCase := newSignInUseCase(users, &fakeVerifier{verified: googleIdentity()})
 		resolve := ginmiddleware.UserResolverFrom(useCase)
 
 		userID, err := resolve(context.Background(), "token-abc")
@@ -130,7 +147,7 @@ func TestUserResolverError(t *testing.T) {
 			users := &fakeUsers{}
 			verifier := &fakeVerifier{verified: googleIdentity()}
 			testCase.arrange(users, verifier)
-			useCase := application.NewSignInUseCase(users, verifier)
+			useCase := newSignInUseCase(users, verifier)
 			resolve := ginmiddleware.UserResolverFrom(useCase)
 
 			userID, err := resolve(context.Background(), "token-abc")

@@ -33,6 +33,7 @@ import (
 	identityginhandler "github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginhandler"
 	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/ginmiddleware"
 	identityapplication "github.com/luigimenezes13/financial-manager/internal/identity/application"
+	"github.com/luigimenezes13/financial-manager/internal/kernel"
 	"github.com/luigimenezes13/financial-manager/internal/platform/config"
 	"github.com/luigimenezes13/financial-manager/internal/platform/db"
 	"github.com/luigimenezes13/financial-manager/internal/platform/httpmiddleware"
@@ -89,18 +90,18 @@ func run(logger *slog.Logger) error {
 
 	// --- Adapters concretos (a única parte do sistema que sabe o "quem") ---
 	unitOfWork := db.NewUnitOfWork(database)
-	outboxRuntime, err := newOutbox(database, unitOfWork, configuration, logger)
+	outboxRuntime, err := newOutbox(database, configuration, logger)
 	if err != nil {
 		return err
 	}
-	writer := outboxRuntime.writer
+	transactionRunner := kernel.NewTransactionRunner(unitOfWork, outboxRuntime.recorder)
 
-	accounts := entrepo.NewAccountRepository(entClient, writer)
-	transactions := entrepo.NewTransactionRepository(entClient, writer)
+	accounts := entrepo.NewAccountRepository(entClient)
+	transactions := entrepo.NewTransactionRepository(entClient)
 	categories := entrepo.NewCategoryRepository(entClient, unitOfWork)
 	provider := mockprovider.New()
 
-	users := identityentrepo.NewUserRepository(identityClient, writer)
+	users := identityentrepo.NewUserRepository(identityClient)
 	// Qual verificador entra é decidido em tempo de COMPILAÇÃO (ver
 	// verifier_google.go e verifier_devauth.go): o binário de produção não
 	// contém o de desenvolvimento.
@@ -110,24 +111,24 @@ func run(logger *slog.Logger) error {
 	}
 
 	// --- Use cases (só conhecem as portas) ---
-	signIn := identityapplication.NewSignInUseCase(users, verifier)
+	signIn := identityapplication.NewSignInUseCase(users, verifier, transactionRunner)
 	viewProfile := identityapplication.NewViewProfileUseCase(users)
 
-	createAccount := application.NewCreateAccountUseCase(accounts)
+	createAccount := application.NewCreateAccountUseCase(accounts, transactionRunner)
 	listAccounts := application.NewListAccountsUseCase(accounts)
 	viewAccount := application.NewViewAccountUseCase(accounts)
-	renameAccount := application.NewRenameAccountUseCase(accounts)
-	createCategory := application.NewCreateCategoryUseCase(categories)
+	renameAccount := application.NewRenameAccountUseCase(accounts, transactionRunner)
+	createCategory := application.NewCreateCategoryUseCase(categories, transactionRunner)
 	listCategories := application.NewListCategoriesUseCase(categories)
-	renameCategory := application.NewRenameCategoryUseCase(categories)
-	moveCategory := application.NewMoveCategoryUseCase(categories)
-	addCategoryRule := application.NewAddCategoryRuleUseCase(categories)
-	removeCategoryRule := application.NewRemoveCategoryRuleUseCase(categories)
+	renameCategory := application.NewRenameCategoryUseCase(categories, transactionRunner)
+	moveCategory := application.NewMoveCategoryUseCase(categories, transactionRunner)
+	addCategoryRule := application.NewAddCategoryRuleUseCase(categories, transactionRunner)
+	removeCategoryRule := application.NewRemoveCategoryRuleUseCase(categories, transactionRunner)
 	listTransactions := application.NewListTransactionsUseCase(transactions)
 	viewTransaction := application.NewViewTransactionUseCase(transactions)
-	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts)
-	categorizeTransaction := application.NewCategorizeTransactionUseCase(transactions, categories)
-	importFromProvider := application.NewImportFromProviderUseCase(transactions, accounts, provider, unitOfWork)
+	recordTransaction := application.NewRecordTransactionUseCase(transactions, accounts, transactionRunner)
+	categorizeTransaction := application.NewCategorizeTransactionUseCase(transactions, categories, transactionRunner)
+	importFromProvider := application.NewImportFromProviderUseCase(transactions, accounts, provider, transactionRunner)
 
 	// --- Borda HTTP ---
 	router := gin.New()

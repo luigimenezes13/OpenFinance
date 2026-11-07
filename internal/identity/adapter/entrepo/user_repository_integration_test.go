@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/luigimenezes13/financial-manager/internal/identity/adapter/entrepo"
 	identity "github.com/luigimenezes13/financial-manager/internal/identity/domain"
 )
 
@@ -55,12 +56,16 @@ func mustUserWithAvatar(t *testing.T, email string, subject string, avatar ident
 	return registered
 }
 
+func newUserRepository() *entrepo.UserRepository {
+	return entrepo.NewUserRepository(testClient)
+}
+
 func TestUserRepositoryIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("should round-trip the user through both port queries, including the login lookup by external identity", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 		original := mustUser(t, "luigi@example.com", "google-sub-123")
 
 		require.NoError(t, repository.Save(ctx, original))
@@ -86,7 +91,7 @@ func TestUserRepositoryIntegration(t *testing.T) {
 
 	t.Run("should signal a first access with a clean not found error", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 		external, err := identity.NewExternalIdentity(identity.ProviderGoogle, "unknown")
 		require.NoError(t, err)
 
@@ -104,7 +109,7 @@ func TestUserRepositoryIntegration(t *testing.T) {
 
 	t.Run("should upsert the profile while preserving the external anchor and the registration instant", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 		target := mustUser(t, "luigi@example.com", "google-sub-123")
 		require.NoError(t, repository.Save(ctx, target))
 		registeredAtBefore := target.Snapshot().RegisteredAt
@@ -133,7 +138,7 @@ func TestUserRepositoryIntegration(t *testing.T) {
 
 	t.Run("should reject a second local user for the same provider subject so racing first logins cannot create two", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
 
 		duplicate := mustUser(t, "other@example.com", "google-sub-123")
@@ -144,7 +149,7 @@ func TestUserRepositoryIntegration(t *testing.T) {
 
 	t.Run("should accept the same email for different subjects because identity is the provider subject, not the email", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-123")))
 		require.NoError(t, repository.Save(ctx, mustUser(t, "luigi@example.com", "google-sub-999")))
 
@@ -168,7 +173,7 @@ func TestUserRepositoryIntegration(t *testing.T) {
 
 	t.Run("should store a missing avatar as an empty string, not NULL, and overwrite it through the upsert", func(t *testing.T) {
 		truncateUsers(t)
-		repository := newUserRepository(t)
+		repository := newUserRepository()
 
 		withoutAvatar := mustUserWithAvatar(t, "no-photo@example.com", "google-sub-no-photo", identity.AvatarURL{})
 		require.NoError(t, repository.Save(ctx, withoutAvatar))

@@ -20,7 +20,7 @@ func TestCreateCategory(t *testing.T) {
 		t.Parallel()
 
 		categories := newFakeCategories()
-		useCase := application.NewCreateCategoryUseCase(categories)
+		useCase := application.NewCreateCategoryUseCase(categories, newPassThroughRunner())
 		ownerID := uuid.New()
 
 		output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
@@ -39,7 +39,7 @@ func TestCreateCategory(t *testing.T) {
 		t.Parallel()
 
 		categories := newFakeCategories()
-		useCase := application.NewCreateCategoryUseCase(categories)
+		useCase := application.NewCreateCategoryUseCase(categories, newPassThroughRunner())
 		parentID := uuid.New()
 
 		output, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
@@ -58,7 +58,7 @@ func TestCreateCategory(t *testing.T) {
 
 		categories := newFakeCategories()
 		categories.saveErr = errInfra
-		useCase := application.NewCreateCategoryUseCase(categories)
+		useCase := application.NewCreateCategoryUseCase(categories, newPassThroughRunner())
 
 		_, err := useCase.Execute(context.Background(), application.CreateCategoryInput{
 			UserID: uuid.New(),
@@ -101,7 +101,7 @@ func TestCreateCategoryRefusal(t *testing.T) {
 			t.Parallel()
 
 			categories := newFakeCategories()
-			useCase := application.NewCreateCategoryUseCase(categories)
+			useCase := application.NewCreateCategoryUseCase(categories, newPassThroughRunner())
 
 			_, err := useCase.Execute(context.Background(), testCase.input)
 
