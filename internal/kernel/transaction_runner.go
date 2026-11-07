@@ -8,7 +8,7 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
-var ErrTransactionAlreadyStarted = errors.New("kernel: a transaction runner is already running in this context")
+var ErrTransactionAlreadyStarted = errors.New("kernel: a transaction is already open in this context")
 
 type EventSource interface {
 	Events() []events.Event
@@ -38,10 +38,12 @@ func NewTransactionRunner(unitOfWork UnitOfWork, outbox events.Outbox) *Transact
 // are cleared from the aggregates only after the commit, so a failed run leaves
 // them in place for a retry.
 //
-// Begin refuses to run inside another Begin with ErrTransactionAlreadyStarted:
-// the inner run would clear its aggregates' events before the outer commit.
+// Begin refuses with ErrTransactionAlreadyStarted to run inside another Begin
+// or inside a unit of work that is already open: the inner run would join the
+// outer transaction and clear its aggregates' events before the outer commit,
+// so an outer rollback would lose them.
 func (r *TransactionRunner) Begin(ctx context.Context, work func(ctx context.Context, transaction TransactionContext) error) error {
-	if ctx.Value(runningTransactionKey{}) != nil {
+	if r.transactionAlreadyOpen(ctx) {
 		return ErrTransactionAlreadyStarted
 	}
 
@@ -58,6 +60,10 @@ func (r *TransactionRunner) Begin(ctx context.Context, work func(ctx context.Con
 
 	pending.clearEvents()
 	return nil
+}
+
+func (r *TransactionRunner) transactionAlreadyOpen(ctx context.Context) bool {
+	return ctx.Value(runningTransactionKey{}) != nil || r.unitOfWork.InTransaction(ctx)
 }
 
 type pendingAggregates struct {

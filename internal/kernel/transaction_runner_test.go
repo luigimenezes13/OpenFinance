@@ -34,8 +34,13 @@ func newProbeAggregate(labels ...string) *probeAggregate {
 }
 
 type fakeUnitOfWork struct {
-	commitErr error
-	runs      int
+	commitErr   error
+	alreadyOpen bool
+	runs        int
+}
+
+func (f *fakeUnitOfWork) InTransaction(context.Context) bool {
+	return f.alreadyOpen
 }
 
 func (f *fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
@@ -196,5 +201,23 @@ func TestTransactionRunner(t *testing.T) {
 			t.Errorf("outer error = %v, want the nested refusal", err)
 		}
 		assertLabels(t, aggregate.Events(), "outer")
+	})
+
+	t.Run("should refuse to begin inside a unit of work that is already open", func(t *testing.T) {
+		unitOfWork, outbox := &fakeUnitOfWork{alreadyOpen: true}, &fakeOutbox{}
+		aggregate := newProbeAggregate("kept")
+
+		err := kernel.NewTransactionRunner(unitOfWork, outbox).Begin(context.Background(), func(_ context.Context, transaction kernel.TransactionContext) error {
+			transaction.RecordEventsOf(aggregate)
+			return nil
+		})
+
+		if !errors.Is(err, kernel.ErrTransactionAlreadyStarted) {
+			t.Fatalf("error = %v, want %v", err, kernel.ErrTransactionAlreadyStarted)
+		}
+		if unitOfWork.runs != 0 || outbox.calls != 0 {
+			t.Errorf("unit runs = %d, outbox calls = %d, want neither touched", unitOfWork.runs, outbox.calls)
+		}
+		assertLabels(t, aggregate.Events(), "kept")
 	})
 }

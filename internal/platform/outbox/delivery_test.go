@@ -105,15 +105,15 @@ func TestDeliveryWorker(t *testing.T) {
 		}
 	})
 
-	t.Run("should cancel a delivery addressed to a subscriber that no longer exists", func(t *testing.T) {
-		err := outbox.NewDeliveryWorker(outbox.NewSubscriptions()).Work(context.Background(), deliveryJob("removed"))
+	t.Run("should retry a delivery addressed to a subscriber this process does not know", func(t *testing.T) {
+		err := outbox.NewDeliveryWorker(outbox.NewSubscriptions()).Work(context.Background(), deliveryJob("registered.by.a.newer.version"))
 
-		var cancelled *river.JobCancelError
-		if !errors.As(err, &cancelled) {
-			t.Fatalf("error = %v, want a job cancellation", err)
-		}
 		if !errors.Is(err, outbox.ErrUnknownSubscriber) {
-			t.Errorf("error = %v, want %v", err, outbox.ErrUnknownSubscriber)
+			t.Fatalf("error = %v, want %v", err, outbox.ErrUnknownSubscriber)
+		}
+		var cancelled *river.JobCancelError
+		if errors.As(err, &cancelled) {
+			t.Error("an unknown subscriber cancelled the delivery, so a rolling deploy would lose it")
 		}
 	})
 }

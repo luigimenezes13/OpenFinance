@@ -38,3 +38,8 @@ func (u *SQLUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) 
 	}
 	return nil
 }
+
+func (u *SQLUnitOfWork) InTransaction(ctx context.Context) bool {
+	_, active := TransactionFrom(ctx)
+	return active
+}

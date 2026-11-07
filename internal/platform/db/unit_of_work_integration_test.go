@@ -190,10 +190,16 @@ func TestIntegrationUnitOfWork(t *testing.T) {
 		if _, active := db.TransactionFrom(context.Background()); active {
 			t.Fatal("transaction reported outside a unit")
 		}
+		if p.unit.InTransaction(context.Background()) {
+			t.Fatal("unit reported open outside a unit")
+		}
 
 		err := p.unit.Run(context.Background(), func(ctx context.Context) error {
 			if _, active := db.TransactionFrom(ctx); !active {
 				return errors.New("no transaction inside the unit")
+			}
+			if !p.unit.InTransaction(ctx) {
+				return errors.New("unit reported closed inside a unit")
 			}
 			return nil
 		})
