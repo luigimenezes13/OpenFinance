@@ -120,7 +120,7 @@ Semântica `Required`: se o ctx já carrega tx, `Run` se junta a ela em vez de a
 ### Implementação (platform/db)
 
 - `PostgresUnitOfWork.Run` abre `*sql.Tx`, guarda no ctx com chave não exportada, roda `work`, commita; `defer Rollback()` cobre erro e panic.
-- `AmbientDriver` implementa `dialect.Driver`: em cada `Exec`/`Query`, usa `entsql.Conn{tx}` se há tx no ctx, senão o driver do pool. `Tx(ctx)` devolve `dialect.NopTx(d)` quando já há tx — é isso que faz o `withTx` do `CategoryRepository` e os `UpdateOne` internos do Ent se juntarem à tx externa.
+- `AmbientDriver` implementa `dialect.Driver`: em cada `Exec`/`Query`, usa `entsql.Conn{tx}` se há tx no ctx, senão o driver do pool. `Tx(ctx)` devolve `dialect.NopTx(d)` quando já há tx — é isso que faz o `UnitOfWork.Run` do `CategoryRepository` e os `UpdateOne` internos do Ent se juntarem à tx externa.
 - Os dois `NewClient` (FT e Identity) passam a montar o client sobre `AmbientDriver`. Os clients continuam de longa duração.
 
 ### O use case abre a transação
@@ -138,7 +138,7 @@ err := u.transactionRunner.Begin(ctx, func(ctx context.Context, transactionConte
 - `Begin` roda o `work` dentro do `UnitOfWork`. Leituras e locks feitos com o `ctx` de dentro usam a mesma tx (o `AmbientDriver` resolve), então um `SELECT ... FOR UPDATE` segura até o commit.
 - Quando o `work` retorna sem erro, o runner lê os eventos de cada aggregate entregue e chama `events.Outbox.Record` **antes** do commit. Evento levantado depois do `RecordEventsOf` entra; o mesmo aggregate entregue duas vezes conta uma.
 - Só depois do commit o runner chama `ClearEvents()`. Falha no `work`, no outbox ou no commit deixa os eventos no aggregate.
-- `Begin` dentro de `Begin` devolve `ErrTransactionAlreadyStarted` (o interno limparia os eventos antes do commit de fora). O `UnitOfWork` continua `Required`: é o que deixa o `CategoryRepository` gravar categoria + regras numa tx própria quando chamado fora de um `Begin`.
+- `Begin` dentro de `Begin`, ou dentro de um `UnitOfWork.Run` já aberto (`UnitOfWork.InTransaction`), devolve `ErrTransactionAlreadyStarted`: o interno se juntaria à tx de fora e limparia os eventos antes do commit dela, e um rollback de fora os perderia. O `UnitOfWork` continua `Required`: é o que deixa o `CategoryRepository` gravar categoria + regras numa tx própria quando chamado fora de um `Begin`.
 - O `outbox.Recorder` implementa `events.Outbox` e recusa rodar sem tx no ctx (`ErrNoTransaction`): esquecer o `Begin` vira erro, não evento perdido.
 - Esquecer o `RecordEventsOf` grava o aggregate sem os eventos. A proteção é teste: cada use case que levanta evento tem caso conferindo o que chegou no outbox fake.
 
@@ -180,7 +180,7 @@ type Envelope struct {
 - **Um job kind só**: `outbox_delivery`, args `{subscriber, event_id, event_name, event_version, occurred_at, payload}`. Único por `(subscriber, event_id)` (`ByArgs` com `river:"unique"` nesses dois campos), então enfileirar a mesma entrega duas vezes é no-op.
 - Os args ficam em `jsonb`: o assinante recebe o payload com o mesmo conteúdo, mas sem garantia de ordem de chaves nem espaçamento. Consumidor compara JSON por conteúdo, nunca por bytes.
 - **Fan-out no `Record`**: para cada assinante registrado no nome do evento, um job (`InsertManyTx` na `*sql.Tx` do ctx). Evento sem assinante não gera job.
-- **`DeliveryWorker`** (`river.Worker[DeliveryArgs]`) resolve o assinante pelo nome e chama `Handle(ctx, Envelope)`. Assinante desconhecido no momento da entrega → `river.JobCancel` (assinante foi removido do código).
+- **`DeliveryWorker`** (`river.Worker[DeliveryArgs]`) resolve o assinante pelo nome e chama `Handle(ctx, Envelope)`. Assinante desconhecido no momento da entrega → erro comum, que o River tenta de novo: num rolling deploy um pod antigo pode pegar a entrega de um assinante que só a versão nova registra. Assinante removido de vez esgota as tentativas e vira `discarded`.
 - **Assinante** tem nome estável (ex.: `log.domain_event`): é parte do args e da unicidade; renomear vira assinante novo.
 - **Config do client**: `PollOnly: true`, fila `default` com `MaxWorkers` configurável (default 10), `MaxAttempts` default do River (25), retry policy default (`attempt^4` ±10%), `JobTimeout` 30s, retenção default (24h completed, 7d discarded).
 - **Garantia**: at-least-once. Consumidor deduplica por `(Envelope.ID, subscriber)`.
@@ -196,7 +196,7 @@ type Envelope struct {
 
 - `main.go` monta `AmbientDriver` → clients Ent → `UnitOfWork` → registros de mapper e assinantes → `river.Client` → `outbox.Recorder` → `kernel.TransactionRunner` (injetado nos use cases de escrita).
 - `errgroup` com o ctx do sinal: um goroutine roda o servidor HTTP, outro o `river.Client.Start`.
-- Shutdown: para o servidor HTTP (`Shutdown` com timeout), depois `riverClient.Stop(ctx)` com o mesmo prazo, caindo para `StopAndCancel` se estourar. Job interrompido volta pelo rescuer do River.
+- Shutdown: para o servidor HTTP (`Shutdown` com timeout), depois `riverClient.Stop(ctx)` com o mesmo prazo, caindo para `StopAndCancel` se estourar. Job interrompido pelo `StopAndCancel` falha a tentativa e o River tenta de novo; só um processo que morre no meio deixa o job em `running`, e aí o rescuer o devolve depois de `RescueStuckJobsAfter` (1h por padrão).
 - Config nova: `OUTBOX_MAX_WORKERS`, `OUTBOX_JOB_TIMEOUT` (com defaults).
 
 ## 10. Estratégia de Testes
@@ -204,7 +204,7 @@ type Envelope struct {
 Unitários (`make test`):
 - Use cases sem dispatcher; `ImportFromProvider` com fake de `UnitOfWork` (`return work(ctx)`) e teste de que o provider é chamado ANTES do `Run`.
 - Cada mapper: payload esperado em JSON (golden inline).
-- `DeliveryWorker`: roteia para o assinante certo; assinante desconhecido cancela.
+- `DeliveryWorker`: roteia para o assinante certo; assinante desconhecido é tentado de novo, não cancelado.
 
 Integração (tag `integration`, Postgres real):
 - `TransactionRunner.Begin` grava aggregates + jobs na mesma tx; falha no meio não grava nenhum dos dois e mantém os eventos no aggregate.
@@ -225,3 +225,4 @@ Testes novos em inglês, com subtestes `t.Run("should ...")`. Os arquivos de tes
 | 2026-11-06 | Etapa 5. Assinante de log é o `outbox.DomainEventLog` (`log.domain_event`). O River sobe com `context.WithoutCancel`: cancelar o ctx do `Start` é parada brusca, então o sinal só dispara o `Stop` gracioso. O HTTP para antes do worker, para nenhuma requisição gravar evento depois que o worker saiu. Reprocessamento de `discarded` documentado no README por SQL (precisa zerar `finalized_at`). |
 | 2026-11-06 | Etapa 6. Os testes que precisam dos dois BCs e do River ao mesmo tempo (importação que falha no meio, `Run` com os dois clients Ent) ficam em `internal/integrationtest`, num schema próprio com as três pastas de migration aplicadas, para não colidir com os harnesses por BC que rodam em paralelo. |
 | 2026-11-07 | Etapa 7, depois da review do desenho. D1 e D2 invertidas: a fronteira de transação sai do `Save` do repositório e vai para o use case, via `kernel.TransactionRunner`, no desenho do `TransactionRunner` do `mars-billing`. `outbox.AggregateWriter` removido; `Recorder` passa a implementar a porta `events.Outbox`. `Begin` aninhado é recusado. |
+| 2026-11-07 | Etapa 8, depois do code review. Entrega para assinante desconhecido é tentada de novo em vez de cancelada (rolling deploy). `Begin` também recusa rodar dentro de um `UnitOfWork.Run` aberto, via `UnitOfWork.InTransaction`. Docs do `EventRecorder` em inglês e corrigidas para o runner; comentário do rescuer corrigido. |

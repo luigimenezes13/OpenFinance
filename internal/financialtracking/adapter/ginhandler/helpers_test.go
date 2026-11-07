@@ -206,6 +206,10 @@ func (f *fakeCategories) ListByUser(_ context.Context, userID shared.UserID) ([]
 // about translation, not about commit boundaries.
 type passThroughUnitOfWork struct{}
 
+func (passThroughUnitOfWork) InTransaction(context.Context) bool {
+	return false
+}
+
 func (passThroughUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
 	return work(ctx)
 }

@@ -6,34 +6,31 @@ import (
 	"github.com/luigimenezes13/financial-manager/internal/kernel/events"
 )
 
-// EventRecorder é o building block embedável que centraliza o acúmulo de
-// eventos de domínio de um aggregate root. Elimina a repetição de
-// events []events.Event + Events() + ClearEvents() em cada root: o root só
-// embeda o EventRecorder e ganha os três métodos.
-//
-// DDD: infraestrutura do Aggregate Root — não é regra de negócio, é a
-// mecânica de guardar os fatos que o root decidiu emitir.
+// EventRecorder is the embeddable building block that accumulates the domain
+// events of an aggregate root, so each root embeds it instead of repeating the
+// slice, Events and ClearEvents. It is the mechanics of keeping the facts the
+// root decided to raise, not a business rule.
 type EventRecorder struct {
 	events []events.Event
 }
 
-// RecordEvent anexa um evento ao histórico do aggregate. Por convenção é
-// chamado APENAS de dentro do root (nos métodos de mutação). O embedding
-// promove este método como público — a invariante "só o root emite
-// eventos" fica protegida pela barreira internal/ + convenção, não pelo
-// compilador (decisão de design consciente, ver spec 2026-07-17).
+// RecordEvent appends an event to the aggregate's history. By convention only
+// the root's own mutation methods call it: embedding promotes it as public, so
+// the invariant "only the root raises events" rests on the internal/ boundary
+// and convention, not on the compiler.
 func (r *EventRecorder) RecordEvent(event events.Event) {
 	r.events = append(r.events, event)
 }
 
-// Events retorna CÓPIA dos eventos acumulados — expor o slice interno
-// deixaria o chamador mutar o histórico por fora do root. Quem lê é o
-// repositório, que grava os eventos no outbox na mesma transação do Save.
+// Events returns a copy of the accumulated events, so a caller cannot rewrite
+// the root's history through the internal slice. The TransactionRunner reads
+// them and writes them to the outbox in the same transaction as the writes.
 func (r *EventRecorder) Events() []events.Event {
 	return slices.Clone(r.events)
 }
 
-// ClearEvents descarta os eventos depois que o Save os gravou no outbox.
+// ClearEvents drops the events once the transaction that recorded them in the
+// outbox has committed.
 func (r *EventRecorder) ClearEvents() {
 	r.events = nil
 }

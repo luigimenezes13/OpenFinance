@@ -56,8 +56,11 @@ func (o outboxRuntime) start(ctx context.Context) error {
 }
 
 // stop lets running deliveries finish until ctx expires, then cancels them
-// with the same grace period. A cancelled delivery is not lost: River's rescuer
-// makes it available again after the job timeout.
+// with the same grace period. A cancelled delivery is not lost: its work
+// returns the context error, so River records a failed attempt and retries it.
+// Only a process that dies mid-delivery leaves the job running, and River's
+// rescuer makes it available again after RescueStuckJobsAfter (one hour by
+// default).
 func (o outboxRuntime) stop(ctx context.Context, grace time.Duration) error {
 	err := o.queue.Stop(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {

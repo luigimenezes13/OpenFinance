@@ -50,6 +50,10 @@ func (f *fakeUsers) FindByExternalIdentity(_ context.Context, external identity.
 
 type fakeUnitOfWork struct{}
 
+func (fakeUnitOfWork) InTransaction(context.Context) bool {
+	return false
+}
+
 func (fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
 	return work(ctx)
 }

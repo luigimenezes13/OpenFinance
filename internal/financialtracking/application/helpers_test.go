@@ -251,6 +251,10 @@ type fakeUnitOfWork struct {
 	order *callOrder
 }
 
+func (f *fakeUnitOfWork) InTransaction(context.Context) bool {
+	return false
+}
+
 func (f *fakeUnitOfWork) Run(ctx context.Context, work func(ctx context.Context) error) error {
 	f.runs++
 	f.order.record("unitOfWork.Run")
