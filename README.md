@@ -169,10 +169,10 @@ Ao subir a versão do River no `go.mod`, extraia as migrations novas com `make m
 
 | Fase | Escopo | Status |
 |---|---|---|
-| **PR1** | Financial Tracking v1 + Identity com SSO Google: aggregates, use cases de escrita e consulta, API Gin, Postgres/Ent, dispatcher in-process, provider mock | 🚧 em andamento |
-| PR2 | Outbox transacional + worker de entrega (River sobre o Postgres), importação atômica | 🚧 em andamento |
+| PR1 | Financial Tracking v1 + Identity com SSO Google: aggregates, use cases de escrita e consulta, API Gin, Postgres/Ent, dispatcher in-process, provider mock | ✅ concluído ([#1](https://github.com/luigimenezes13/OpenFinance/pull/1)) |
+| PR2 | Outbox transacional + worker de entrega (River sobre o Postgres), importação atômica, transação dona do use case via `TransactionRunner` | ✅ concluído ([#2](https://github.com/luigimenezes13/OpenFinance/pull/2)) |
 | PR3 | ~~Identity completo~~ — antecipado no PR1 via SSO Google | — |
-| PR4 | Integração Open Finance real via Pluggy (webhooks, consent, reconciliação, idempotência do import) | backlog |
+| **PR4** | Integração Open Finance real via Pluggy (webhooks, consent, reconciliação, idempotência do import) | próximo |
 | PR5 | Goals & Budgets BC consumindo eventos de Financial Tracking | backlog |
 
 A pesquisa técnica da API Pluggy que fundamenta o PR4 está em [`docs/research/pluggy-api.md`](docs/research/pluggy-api.md).
