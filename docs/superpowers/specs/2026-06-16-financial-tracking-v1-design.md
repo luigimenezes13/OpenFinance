@@ -1,7 +1,7 @@
 # Financial Tracking v1 — Design Spec
 
 **Data:** 2026-06-16
-**Status:** Draft
+**Status:** Implementado
 **Linguagem-alvo:** Go 1.22+
 **Projeto:** Gestor de gastos com Open Finance — primeira fatia (Financial Tracking BC)
 

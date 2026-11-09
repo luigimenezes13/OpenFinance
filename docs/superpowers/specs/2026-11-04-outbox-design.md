@@ -1,7 +1,7 @@
 # Outbox Transacional + Worker (PR2) — Design Spec
 
 **Data:** 2026-11-04
-**Status:** Draft
+**Status:** Implementado
 **Linguagem-alvo:** Go 1.26+
 **Projeto:** Gestor de gastos com Open Finance — troca do dispatcher in-process por outbox transacional
 
@@ -226,3 +226,4 @@ Testes novos em inglês, com subtestes `t.Run("should ...")`. Os arquivos de tes
 | 2026-11-06 | Etapa 6. Os testes que precisam dos dois BCs e do River ao mesmo tempo (importação que falha no meio, `Run` com os dois clients Ent) ficam em `internal/integrationtest`, num schema próprio com as três pastas de migration aplicadas, para não colidir com os harnesses por BC que rodam em paralelo. |
 | 2026-11-07 | Etapa 7, depois da review do desenho. D1 e D2 invertidas: a fronteira de transação sai do `Save` do repositório e vai para o use case, via `kernel.TransactionRunner`, no desenho do `TransactionRunner` do `mars-billing`. `outbox.AggregateWriter` removido; `Recorder` passa a implementar a porta `events.Outbox`. `Begin` aninhado é recusado. |
 | 2026-11-07 | Etapa 8, depois do code review. Entrega para assinante desconhecido é tentada de novo em vez de cancelada (rolling deploy). `Begin` também recusa rodar dentro de um `UnitOfWork.Run` aberto, via `UnitOfWork.InTransaction`. Docs do `EventRecorder` em inglês e corrigidas para o runner; comentário do rescuer corrigido. |
+| 2026-11-09 | PR #2 mergeado na `main`. Status passa a Implementado. Ficam em aberto, sem prazo, os achados M2 (guarda para `RecordEventsOf` esquecido), M3 (id do evento definido no domínio), M4 (testes do ciclo de vida em `cmd/api`) e M5 (fakes de teste compartilhados) da review. |
